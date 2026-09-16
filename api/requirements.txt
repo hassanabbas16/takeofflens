@@ -1,0 +1,22 @@
+# ---- Phase 0 base ----
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+sqlalchemy==2.0.36
+alembic==1.14.0
+psycopg[binary]==3.2.3
+python-multipart==0.0.20
+
+# ---- Phase 1 (CV/OCR) ----
+# PaddleOCR is a heavy install. It is added at the start of Phase 1 so a failure there
+# is isolated and visible, rather than silently breaking the Phase 0 scaffold.
+# opencv-python-headless, pymupdf, paddleocr, paddlepaddle
+
+# ---- Phase 3 (LLM) ----
+# openai
+
+# ---- Dev ----
+pytest==8.3.4
+httpx==0.28.1
+ruff==0.8.6

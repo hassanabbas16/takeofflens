@@ -15,7 +15,67 @@ This is a portfolio project for an AI/CV full-stack role. It must actually work 
 - DB: PostgreSQL 16
 - Frontend: Next.js (App Router), TypeScript, Tailwind CSS
 - Infra: Docker + docker-compose (api, web, db)
+- Dataset: CubiCasa5K, mounted read-only from host via `DATASET_DIR` (never copied into the repo)
 - Tests: pytest (backend)
+
+## Dataset (CubiCasa5K)
+
+Mounted read-only, never vendored into the repo.
+
+- Host path comes from env `DATASET_DIR` (plans) and `DATASET_COCO_DIR` (COCO annotations).
+- docker-compose mounts them read-only at `/data/cubicasa5k` and `/data/cubicasa5k_coco` inside `api`.
+- Put the host paths in `.env` only; `.env.example` documents them with placeholder values.
+- `eval/data/` is NOT a copy of the dataset. It holds only the selected plan ID lists
+  (`eval/data/*.txt`) that point into the mounted dataset.
+
+### Layout
+```
+$DATASET_DIR/
+  train.txt val.txt test.txt     # one plan dir per line, e.g. /high_quality_architectural/1191/
+  colorful/<id>/                 # F1_original.png, F1_scaled.png, model.svg
+  high_quality/<id>/
+  high_quality_architectural/<id>/
+$DATASET_COCO_DIR/
+  train_coco_pt.json val_coco_pt.json test_coco_pt.json
+```
+Split sizes: train 4199, val 399, test 399 plan dirs.
+
+### Text characteristics — measured, and they drive the eval tiers
+The three folders are very different documents, and only one of them has numbers on it.
+Verified by inspecting sample plans from each folder; Tier 1 exists to quantify this over the
+whole test split rather than trusting the samples.
+
+| Folder | test split | Room labels on the image | Areas / dimensions on the image |
+| --- | --- | --- | --- |
+| `high_quality_architectural` | 270 | yes, Finnish abbreviations | often, but inconsistent |
+| `high_quality` | 63 | yes, Finnish abbreviations | rarely |
+| `colorful` | 67 | none — CubiCasa vector renders | none |
+
+- `colorful` pages carry only boilerplate ("SUUNTAA-ANTAVA, EI MITTAKAAVASSA") and the CubiCasa
+  logo. They are a legitimate *negative* set for OCR, not part of the dimension eval.
+- Room text is frequently rotated 90 degrees. The OCR angle classifier is mandatory, not optional.
+- Scanned pages carry handwriting, stamps and pen marks.
+
+### `model.svg` is the annotation, not the drawing
+`F1_*.png` is the real estate agent's plan; `model.svg` is CubiCasa's hand annotation of it.
+They do not contain the same text, so never treat SVG strings as OCR ground truth.
+
+- Room polygons live under `class="Space <Type>"`; `<Type>` is already English
+  (`Bedroom`, `Kitchen`, `Bath Shower`, `Outdoor Balcony`, `Undefined`, ...).
+- `TextLabel NameLabel` holds the Finnish label (`MH`, `OH`, `KHH`). XML entities appear
+  here (`KEITTI&#xD6;` = `KEITTIÖ`) and must be unescaped.
+- `TextLabel DimensionMeasureLabel` holds `12'3" x 6'1"` and `3.63 m x 3.90 m`, but it is
+  `style="display: none"` on every plan sampled, so those strings are **not** rendered into the
+  PNG and are not what OCR sees.
+- **Scale is a constant 100 SVG units = 1 metre.** Measured over 5127 room edges across 200 test
+  plans: median ratio 100.02. The ~7% of edges that deviate are L-shaped rooms whose bounding box
+  is not the nominal labelled dimension, not a change in scale. The ground-truth generator must
+  still compute the per-plan median ratio and flag any plan that deviates from 100.
+- Room area is therefore the shoelace area of the `Space` polygon / 10000.
+  Spot-checked against the areas printed on the drawing: agreement within ~1-2%
+  (polygon follows the inner wall face; the printed figure uses the agent's own convention).
+  Close enough to pre-fill a labelling helper, not close enough to be an oracle — which is
+  exactly why Tier 4 is hand-verified.
 
 ## Repo structure
 ```
@@ -34,7 +94,8 @@ takeofflens/
         ingest.py          # PDF/image -> normalized page images
         preprocess.py      # OpenCV steps
         ocr.py             # OCR wrapper, returns text + bbox + confidence
-        parse_dims.py      # regex dimension parser -> meters + area
+        parse_dims.py      # regex dimension parser -> meters + area (Finnish formats)
+        room_types.py      # Finnish -> English room type mapping
         classify.py        # OpenAI text model: OCR tokens -> structured rooms JSON
         vlm_direct.py      # OpenAI vision model baseline (image -> rooms JSON)
         run.py             # orchestrates the pipeline
@@ -51,9 +112,20 @@ takeofflens/
       RoomsTable.tsx
     Dockerfile
   eval/
-    data/                  # sample plans (gitignored if large) + README on source
-    ground_truth/          # hand-labeled JSON per plan
+    data/                  # plan ID lists only (gold_15.txt) - never image data
+    cache/                 # ocr/ and llm/ per-plan caches (gitignored)
+    ground_truth/
+      auto/                # Tier 2, generated from model.svg
+      gold/                # Tier 4, hand-verified
+    results/               # per-tier reports
+    tier1_ocr_sweep.py
+    tier2_ground_truth.py
+    tier3_llm.py
+    tier4_gold.py
+    label_helper.py
+    pricing.yaml           # model rates + date taken
     run_eval.py            # computes metrics, writes eval/results.md
+    README.md              # dataset source, license, tier descriptions
   docker-compose.yml
   .env.example
   README.md
@@ -70,11 +142,89 @@ takeofflens/
 1. **Ingest**: PDF pages rendered at 300 DPI via PyMuPDF; images passed through. Store page images to a local `storage/` volume behind a `Storage` interface so S3 can be swapped in later.
 2. **Preprocess** (each step toggleable via config, for eval ablations): grayscale, denoise, adaptive threshold, deskew, upscale if the short side < 2000px.
 3. **OCR**: return a list of `{text, confidence, bbox}`. Handle rotated text (PaddleOCR angle classifier on). Drop tokens below a configurable confidence.
-4. **Dimension parsing**: regex + unit normalization. Must handle at minimum: `12'6" x 10'`, `12' - 6" x 10' - 0"`, `3.5 x 4.2`, `3.5m x 4.2m`, `3500 x 4200` (mm). Convert all to meters, compute area. Unit tests for every format plus malformed input.
+4. **Dimension parsing**: regex + unit normalization. Convert all to metres, compute area.
+   Unit tests for every format plus malformed input.
+
+   Generic formats (keep — the parser should not be dataset-specific):
+   `12'6" x 10'`, `12' - 6" x 10' - 0"`, `3.5 x 4.2`, `3.5m x 4.2m`, `3500 x 4200` (mm).
+
+   Finnish / CubiCasa formats, which are what this dataset actually prints:
+   - **Comma decimals**: `12,5` means 12.5. Accept comma and period as decimal separators.
+     Note: the architectural plans sampled so far printed a period (`MH 11.7`); Finnish
+     convention is the comma. Support both and let Tier 1 report which dominates — do not
+     assume either.
+   - **Bare area under a room label**, which is the dominant form here: the label is
+     `MH` with `11.7` beneath it, meaning a 11.7 m² bedroom. This is a single **area**,
+     not a `width x length` pair. `area_m2` is set and `width_m`/`length_m` stay null.
+     Do not fabricate a width and length by taking a square root.
+   - Area units appear as `m²`, `m2` and `M2`.
+   - **Apartment summary strings**: `4H K KH WC 90 M2` (4 rooms + kitchen + bath + WC, 90 m²)
+     describe the whole unit, not a room. Parse to a separate summary, never as a room.
+   - **Wall run dimensions in mm** along the page margin: `19940`, `11000`, `3970`. Bare
+     4-5 digit integers. These are building dimensions, not room dimensions.
+   - **Door and window size codes**: `9X21`, `14X12`, `8X21`, `12X16`. These are Finnish
+     door/window decimetre codes and are extremely common on architectural plans. They look
+     exactly like a `w x h` dimension pair and are the parser's main false-positive source.
+     **They must be classified as door/window codes and excluded from room dimensions.**
+     Heuristic: both operands are bare integers <= 30 with no unit, written with `X`/`x`
+     and no decimal separator. Unit-test this against real room dimensions.
+   - **Elevation marks**: `+46.290`, `+46.950`. Never a dimension.
+
+   `parse_dims.py` returns a typed result carrying which format matched, so eval can report
+   accuracy per format rather than one aggregate number.
 5. **Classify**: send OCR tokens (text + bbox) to the OpenAI text model with a strict JSON schema. Associate each room label with its nearest dimension string using bbox proximity *before* the LLM call, and pass candidate pairs in the prompt. Validate with Pydantic; retry once on failure; never crash the job. Temperature 0.
 6. **VLM baseline**: send the page image (base64, downscaled to a sensible max size to control cost) directly to the OpenAI vision model, same output schema. Store with `source="vlm"` so the two approaches can be compared.
 7. Log every OpenAI call to `llm_calls` (tokens, latency). Cost per page is computed in eval from a pricing config file, not hardcoded in logic.
 8. Processing runs as a FastAPI BackgroundTask for now. Keep the interface clean enough to move to a queue later; note that in the README.
+
+## Finnish room labels
+
+`api/app/pipeline/room_types.py` holds the Finnish -> English mapping, as data, not inline
+literals. The observed label frequencies below are counted over 120 test-split `model.svg`
+files, so the mapping covers the common cases first.
+
+| Finnish | English `room_type` | seen |
+| --- | --- | --- |
+| MH (makuuhuone) | bedroom | 204 |
+| ULKOTILA | outdoor | 131 |
+| OH (olohuone) | living_room | 99 |
+| WC | wc | 94 |
+| ET (eteinen) | entry | 90 |
+| K / KEITTIÖ / KK (keittokomero) | kitchen | 105 |
+| VH (vaatehuone) | walk_in_closet | 63 |
+| TK (tuulikaappi) | draught_lobby | 48 |
+| PH / PESUH / PSH (pesuhuone) | washroom | 65 |
+| VAR / VARASTO | storage | 54 |
+| H (huone) | room | 35 |
+| KHH (kodinhoitohuone) | utility | 33 |
+| PARVEKE / PARV. | balcony | 31 |
+| KH / KPH (kylpyhuone) | bathroom | 40 |
+| TERASSI | terrace | 25 |
+| KUISTI | porch | 17 |
+| AULA | hall | 10 |
+| AH (askarteluhuone) | hobby_room | 10 |
+| RUOK (ruokailu) | dining | 9 |
+| AUTOKATOS | carport | 9 |
+| AUTOTALLI | garage | 7 |
+| TEKN | technical_room | 8 |
+| ULLAKKO | attic | 7 |
+| SH (saunahuone) / SAUNA | sauna | 7 |
+| KÄYTÄVÄ | corridor | 6 |
+| PUKUH (pukuhuone) | dressing_room | 5 |
+| TYÖHUONE / TH | office | 7 |
+| ALKOVI | alcove | 4 |
+| UNDEFINED | undefined | 243 |
+
+Rules:
+- Match case-insensitively, strip trailing `.`, and unescape XML entities before lookup.
+- Compound labels joined with `+` (`OLESKELU+RUOK`) map to a list of types; keep the
+  raw text in `raw_text` and pick the first as the primary `room_type`.
+- Unknown labels get `room_type="unknown"` with `raw_text` preserved. Never guess.
+- `UNDEFINED` is the single most common label in the dataset. It is a real annotation value
+  meaning the annotator did not assign a type — map it to `undefined`, and exclude it from
+  room-type accuracy metrics, reporting its share separately.
+- The mapping is also used to score the LLM output, so it must be a pure lookup with no
+  LLM involvement.
 
 ## API
 - `POST /plans` (multipart upload) -> `{id, status}`
@@ -89,16 +239,111 @@ takeofflens/
 - Viewer: plan image on the left with OCR bbox overlays (toggle on/off), rooms table on the right. Hovering a row highlights its bbox. Toggle between "OCR+LLM" and "VLM" results. Export buttons.
 - Clean, minimal Tailwind UI. No component libraries needed.
 
-## Evaluation (this is what makes the project credible)
-- `eval/data/`: 10–20 floor plans. Use CubiCasa5K or public-domain plans; document source and license in `eval/README.md`.
-- `eval/ground_truth/`: I will hand-label rooms (name + dimensions) per plan. Create a labeling template and a small CLI helper to speed it up.
-- `run_eval.py` reports, per approach (ocr+llm vs vlm) and per preprocessing config:
-  - OCR token recall for room labels
-  - room detection precision/recall/F1 (fuzzy name match)
-  - dimension accuracy (within 5% tolerance)
-  - mean latency and approx cost per page (from `llm_calls` + pricing config)
-- Writes `eval/results.md` with a table plus a failure-case section (where each approach breaks and why).
-- Numbers go in the README exactly as measured.
+## Evaluation — tiered
+
+Cost and hand-labelling effort both scale with plan count, so the eval is staged. Each tier is a
+separate entry point under `eval/`, each writes machine-readable output that the next tier reads,
+and nothing re-does work a previous tier already did.
+
+All tiers read plans from the mounted `DATASET_DIR`. None of them copy image data into the repo.
+
+### Tier 1 — OCR sweep over all plans (no LLM, no cost)
+`eval/tier1_ocr_sweep.py`
+
+- Runs ingest + preprocess + OCR over every plan in the split(s) given on the CLI.
+- **Resumable**: one result file per plan under `eval/cache/ocr/<folder>/<id>.json`. A plan
+  with an existing cache entry is skipped unless `--force`. Killing and restarting must lose
+  at most the plan in flight.
+- **Progress**: tqdm to stderr with rate and ETA; `--workers N` for parallelism.
+- Failures are recorded as a cache entry with an `error` field, never a crash, and are counted
+  in the report rather than silently dropped.
+- Writes `eval/results/tier1_ocr.md` + `.json` reporting, overall and **broken down by folder**:
+  - plans processed, failed, cached
+  - token count distribution per plan
+  - **how many plans have usable text**, against a stated threshold. Define "usable" explicitly
+    as: >= 3 tokens above the confidence floor that match a known Finnish room label. Report
+    the threshold in the output so the number is interpretable, and also report the raw count
+    at a couple of nearby thresholds so the choice is visible rather than tuned.
+  - how many have any parseable area or dimension token
+  - decimal separator counts (comma vs period) actually observed
+  - mean OCR latency per page
+- This tier's output is what selects the plans used in Tiers 3 and 4. It runs first.
+
+### Tier 2 — ground truth from `model.svg` (free, automatic, whole dataset)
+`eval/tier2_ground_truth.py`
+
+- For every plan, parses `model.svg` into `eval/ground_truth/auto/<folder>/<id>.json`:
+  room type (from the `Space <Type>` class), Finnish name label, polygon, bbox,
+  and area from the shoelace formula at 100 units/m.
+- Gives **room type and room count** ground truth for the entire dataset without hand-labelling.
+- Also emits the per-plan median scale ratio and flags plans deviating from 100 u/m.
+- Writes `eval/results/tier2_ground_truth.md`: room-type distribution, plans with unparseable
+  SVG, flagged-scale plans, `Undefined` share.
+- This is **automatic** ground truth. It is labelled as such everywhere it is used, and it is
+  never described as hand-verified. Areas here are derived from the annotation polygon, not
+  read off the drawing.
+
+### Tier 3 — OpenAI approaches on the test split, cost-gated
+`eval/tier3_llm.py`
+
+Runs both `ocr+llm` and `vlm` over the **test split only** (399 plans), reusing the Tier 1 OCR
+cache so no OCR is recomputed. LLM responses are cached per (plan, approach, model) under
+`eval/cache/llm/` and are resumable on the same terms as Tier 1.
+
+**Cost gate — this is a hard stop:**
+1. Run the first **20 test plans only** (`--limit 20`, deterministic order, recorded in the
+   output so the sample is reproducible).
+2. Write `eval/results/tier3_cost_probe.md` from the `llm_calls` table and
+   `eval/pricing.yaml`: measured input/output tokens per page, **measured cost per page for
+   each approach separately**, measured latency per page, and the extrapolated cost of the
+   full 399-plan run for both approaches.
+3. **Stop. Report the measured numbers and wait for explicit approval before the remaining
+   379 plans.** Do not continue automatically, and do not treat `--limit 20` finishing
+   cleanly as approval. The full run is gated behind an explicit `--approved-budget` flag so
+   it cannot start by accident.
+
+Pricing comes from `eval/pricing.yaml` (per-model input/output rates, with the date the rates
+were taken). Cost is computed from logged tokens; it is never hardcoded in pipeline logic and
+never estimated when a real token count is available.
+
+### Tier 4 — hand-verified gold set for dimensions and areas
+`eval/tier4_gold.py` (selection) + `eval/label_helper.py` (labelling CLI)
+
+- Selects **15 test-split plans with readable text**, ranked by the Tier 1 signal:
+  prefers `high_quality_architectural`, requires parseable area/dimension tokens, and spreads
+  across room counts so the set is not all studios. Writes the chosen IDs and the reason each
+  was chosen to `eval/data/gold_15.txt` so the selection is auditable and reproducible.
+- `label_helper.py` is the labelling CLI I will actually use:
+  - Renders the page with OCR boxes drawn to `eval/labelling/<id>.png` for reference.
+  - **Pre-fills each room from Tier 2**: SVG room type, Finnish label, and polygon area.
+  - Walks room by room, showing the pre-filled value and the OCR tokens near that room's
+    polygon, and asks only for confirm / correct / skip. Typing is the exception, not the rule.
+  - Writes `eval/ground_truth/gold/<id>.json` with `"verified": true` per field, so a field
+    that was accepted from the SVG is distinguishable from one a human actually read off
+    the drawing.
+  - Resumable per plan and per room; re-running continues where it stopped.
+  - `--review <id>` re-opens a finished plan for correction.
+
+Only this tier's numbers are described as hand-verified in the README.
+
+### Metrics
+`eval/run_eval.py` consumes the tier outputs and writes `eval/results.md`.
+
+Per approach (`ocr+llm` vs `vlm`) and per preprocessing config:
+- OCR token recall for room labels (vs Tier 2 name labels)
+- room detection precision / recall / F1, fuzzy name match (vs Tier 2, whole test split)
+- room-type accuracy (vs Tier 2, `Undefined` excluded and reported separately)
+- dimension and area accuracy within 5% tolerance — **Tier 4 gold set only**, n=15, and the
+  n is printed next to every number
+- accuracy per dimension format, using the format tag from `parse_dims.py`
+- mean latency and measured cost per page from `llm_calls` + `eval/pricing.yaml`
+
+`eval/results.md` includes a failure-case section: where each approach breaks and why, with
+the plan IDs, including the `colorful` no-text pages and rotated-label failures.
+
+Every table states its sample size and whether its ground truth is automatic (Tier 2) or
+hand-verified (Tier 4). Numbers go in the README exactly as measured. If a tier has not been
+run, its numbers are absent — never placeholders, never estimates.
 
 ## Build phases — stop after each, summarize, and wait for my go-ahead
 - **Phase 0**: Scaffold repo, docker-compose with db/api/web, health endpoint, `.env.example`, Alembic init. Verify `docker compose up` works.
@@ -107,8 +352,29 @@ takeofflens/
 - **Phase 3**: OpenAI classification + VLM baseline, Structured Outputs, Pydantic validation, call logging, DB persistence.
 - **Phase 4**: API routes + background processing + export.
 - **Phase 5**: Next.js upload + viewer.
-- **Phase 6**: Eval harness + results.md.
+- **Phase 6**: Eval harness, built and run tier by tier.
+  - 6a: Tier 1 OCR sweep (resumable, cached, progress). Report usable-text counts per folder.
+  - 6b: Tier 2 ground truth from `model.svg`. Report room-type distribution.
+  - 6c: Tier 3 cost probe on 20 test plans. **Report measured cost per page and stop for approval**
+        before the remaining 379.
+  - 6d: Tier 4 gold-set selection + labelling helper, handed over for me to label.
+  - 6e: `run_eval.py` + `results.md` once the gold set exists.
 - **Phase 7**: README (Mermaid architecture diagram, setup, eval results, known limitations, how to scale: S3, job queue, batching, GPU OCR), demo GIF instructions.
+- **Phase 8** (do not start until I say so): local detector as a third approach.
+  - Train a small PyTorch detector on the CubiCasa5K COCO annotations.
+  - Export to ONNX, run it in the pipeline with ONNX Runtime (CPU), `source="detector"`.
+  - Compare against `ocr+llm` and `vlm` in `eval/results.md` on accuracy, latency and cost
+    (the detector's marginal cost per page is zero, which is the point of the comparison).
+  - **Blocker to resolve before starting:** the supplied COCO files contain only two
+    categories, `wall` and `room` - there are **no door or window annotations** in them
+    (verified across all three splits: train 173023 anns, val 15926, test 16818, categories
+    `['wall','room']`). A room/door/window detector cannot be trained from the COCO files
+    alone. `model.svg` does carry `Door Swing *` and `Window *` geometry, so the options are
+    (a) ship a wall/room detector from COCO as-is, or (b) generate door/window boxes from
+    `model.svg` first and train on the union. Decide before any training starts.
+  - Also note: COCO `file_name` values are absolute Kaggle paths
+    (`/kaggle/input/cubicasa5k/...`). Remap to `DATASET_DIR` at load time; do not rewrite the
+    annotation files.
 
 ## Rules
 - Plan before coding each phase; list files you'll touch.

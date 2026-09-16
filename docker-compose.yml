@@ -1,0 +1,60 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: ./api
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_TEXT_MODEL: ${OPENAI_TEXT_MODEL}
+      OPENAI_VISION_MODEL: ${OPENAI_VISION_MODEL}
+      STORAGE_DIR: ${STORAGE_DIR:-/storage}
+      DATASET_DIR: ${DATASET_MOUNT:-/data/cubicasa5k}
+      DATASET_COCO_DIR: ${DATASET_COCO_MOUNT:-/data/cubicasa5k_coco}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-20}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    volumes:
+      - ./api:/app
+      - ./eval:/eval
+      - takeoff_storage:/storage
+      # Dataset is mounted read-only and never copied into the repo.
+      - ${DATASET_DIR}:${DATASET_MOUNT:-/data/cubicasa5k}:ro
+      - ${DATASET_COCO_DIR}:${DATASET_COCO_MOUNT:-/data/cubicasa5k_coco}:ro
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  web:
+    build: ./web
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    volumes:
+      - ./web:/app
+      - /app/node_modules
+      - /app/.next
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      - api
+    command: npm run dev
+
+volumes:
+  pgdata:
+  takeoff_storage:
