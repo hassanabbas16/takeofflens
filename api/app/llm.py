@@ -237,6 +237,17 @@ class LlmClient:
         return LlmResult(parsed=None, usage=usage)
 
 
+    @property
+    def raw(self) -> Any:
+        """The underlying SDK client.
+
+        Exposed for the Batch API, which lives on the SDK client rather than behind this
+        wrapper. Named rather than reached into, so callers are not poking at a private
+        attribute and the coupling is visible.
+        """
+        return self._client
+
+
 def model_rejects_temperature(model: str) -> bool:
     """Whether a rejection has been observed for this model in this process."""
     return model in _NO_TEMPERATURE

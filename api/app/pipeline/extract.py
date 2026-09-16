@@ -122,7 +122,12 @@ def encode_page_image(image: np.ndarray, max_px: int, jpeg_quality: int) -> tupl
     return encoded, image.shape[1], image.shape[0]
 
 
-def _image_content(encoded: str) -> dict[str, Any]:
+def system_prompt() -> str:
+    """The shared domain briefing, so the batch path sends exactly what the sync path does."""
+    return _FINNISH_RULES
+
+
+def image_content(encoded: str) -> dict[str, Any]:
     # Anthropic takes the base64 payload and media type as structured fields, not as a
     # data: URL.
     return {
@@ -131,7 +136,7 @@ def _image_content(encoded: str) -> dict[str, Any]:
     }
 
 
-def _text_content(text: str) -> dict[str, Any]:
+def text_content(text: str) -> dict[str, Any]:
     return {"type": "text", "text": text}
 
 
@@ -153,15 +158,14 @@ def _run(
 # --- ocr+llm ---------------------------------------------------------------------------
 
 
-def extract_ocr_llm(
-    tokens: list[OcrToken], client: LlmClient, model: str | None = None
-) -> ExtractionOutcome:
-    settings = get_settings()
-    model = model or settings.anthropic_text_model
-    refs = TokenRef.from_tokens(tokens)
-    pairs = find_candidate_pairs(refs)
+def build_ocr_llm_prompt(refs: list[TokenRef]) -> str:
+    """The user turn for the ocr+llm approach.
 
-    prompt = f"""{_CITATION_RULES}
+    Split out from the call so the synchronous path and the Batch API path send byte-for-byte
+    the same prompt - otherwise the batch run would not be measuring the same thing.
+    """
+    pairs = find_candidate_pairs(refs)
+    return f"""{_CITATION_RULES}
 
 You are given the OCR output of one floor plan page. The page was OCR'd at four rotations
 and merged, so some readings may still be garbled; ignore tokens that are not meaningful.
@@ -175,13 +179,25 @@ box positions alone, not ground truth - accept the ones that make sense and igno
 
 Return every room you can identify."""
 
+
+def extract_ocr_llm(
+    tokens: list[OcrToken], client: LlmClient, model: str | None = None
+) -> ExtractionOutcome:
+    settings = get_settings()
+    model = model or settings.anthropic_text_model
+    refs = TokenRef.from_tokens(tokens)
+    prompt = build_ocr_llm_prompt(refs)
+
     parsed, usage = _run(
         client, model, [{"role": "user", "content": prompt}], purpose="classify"
     )
     if parsed is None:
         return ExtractionOutcome(Source.OCR_LLM, None, usage, refs, usage.error)
-    grounded = check_grounding(parsed, refs, hard=True, drop=False)
-    return ExtractionOutcome(Source.OCR_LLM, grounded, usage, refs)
+    return ExtractionOutcome(Source.OCR_LLM, ground_ocr_llm(parsed, refs), usage, refs)
+
+
+def ground_ocr_llm(parsed: PlanExtraction, refs: list[TokenRef]) -> GroundedExtraction:
+    return check_grounding(parsed, refs, hard=True, drop=False)
 
 
 # --- vlm -------------------------------------------------------------------------------
@@ -204,7 +220,24 @@ def extract_vlm(
         image, settings.vlm_max_image_px, settings.vlm_jpeg_quality
     )
 
-    prompt = f"""You are looking at one floor plan page, {width}x{height} pixels.
+    prompt = build_vlm_prompt(width, height)
+
+    parsed, usage = _run(
+        client,
+        model,
+        [{"role": "user", "content": [text_content(prompt), image_content(encoded)]}],
+        purpose="vlm",
+    )
+    if parsed is None:
+        return ExtractionOutcome(Source.VLM, None, usage, [], usage.error)
+
+    refs = TokenRef.from_tokens(tokens) if tokens else []
+    return ExtractionOutcome(Source.VLM, ground_vlm(parsed, refs), usage, refs)
+
+
+def build_vlm_prompt(width: int, height: int) -> str:
+    """The user turn for the vlm approach."""
+    return f"""You are looking at one floor plan page, {width}x{height} pixels.
 
 Important: room labels on these plans are frequently ROTATED 90 degrees, so text often runs
 vertically up or down the page rather than left to right. Read it in whatever orientation it
@@ -217,20 +250,11 @@ Set source_token_ids to null: no OCR tokens were provided.
 
 Return every room you can identify."""
 
-    parsed, usage = _run(
-        client,
-        model,
-        [{"role": "user", "content": [_text_content(prompt), _image_content(encoded)]}],
-        purpose="vlm",
-    )
-    if parsed is None:
-        return ExtractionOutcome(Source.VLM, None, usage, [], usage.error)
 
-    # Soft check only: the vision model can legitimately read an area OCR missed, so a
-    # disagreement with OCR measures OCR, not the model.
-    refs = TokenRef.from_tokens(tokens) if tokens else []
-    grounded = check_grounding(parsed, refs, hard=False, drop=False)
-    return ExtractionOutcome(Source.VLM, grounded, usage, refs)
+def ground_vlm(parsed: PlanExtraction, refs: list[TokenRef]) -> GroundedExtraction:
+    """Soft check only: the vision model can legitimately read an area OCR missed, so a
+    disagreement with OCR measures OCR rather than the model."""
+    return check_grounding(parsed, refs, hard=False, drop=False)
 
 
 # --- hybrid ----------------------------------------------------------------------------
@@ -242,12 +266,26 @@ def extract_hybrid(
     settings = get_settings()
     model = model or settings.anthropic_vision_model
     refs = TokenRef.from_tokens(tokens)
-    pairs = find_candidate_pairs(refs)
     encoded, width, height = encode_page_image(
         image, settings.vlm_max_image_px, settings.vlm_jpeg_quality
     )
+    prompt = build_hybrid_prompt(refs, width, height)
 
-    prompt = f"""You are looking at one floor plan page, {width}x{height} pixels, together
+    parsed, usage = _run(
+        client,
+        model,
+        [{"role": "user", "content": [text_content(prompt), image_content(encoded)]}],
+        purpose="hybrid",
+    )
+    if parsed is None:
+        return ExtractionOutcome(Source.HYBRID, None, usage, refs, usage.error)
+    return ExtractionOutcome(Source.HYBRID, ground_hybrid(parsed, refs), usage, refs)
+
+
+def build_hybrid_prompt(refs: list[TokenRef], width: int, height: int) -> str:
+    """The user turn for the hybrid approach."""
+    pairs = find_candidate_pairs(refs)
+    return f"""You are looking at one floor plan page, {width}x{height} pixels, together
 with the OCR output for that same page.
 
 Room labels on these plans are frequently ROTATED 90 degrees. The OCR ran at four rotations
@@ -266,26 +304,20 @@ Candidate label/area pairs computed geometrically by proximity:
 
 Return every room you can identify."""
 
-    parsed, usage = _run(
-        client,
-        model,
-        [{"role": "user", "content": [_text_content(prompt), _image_content(encoded)]}],
-        purpose="hybrid",
-    )
-    if parsed is None:
-        return ExtractionOutcome(Source.HYBRID, None, usage, refs, usage.error)
 
-    # Hard check on ids, because tokens were supplied and citations are checkable. A room
-    # the model explicitly marks as image-only (null ids) is allowed by the prompt, so
-    # missing ids are not treated as a hallucination here - only wrong ids and wrong areas.
+def ground_hybrid(parsed: PlanExtraction, refs: list[TokenRef]) -> GroundedExtraction:
+    """Hard check on ids, because tokens were supplied and citations are checkable.
+
+    A room the model explicitly marks as image-only (null ids) is allowed by the prompt, so
+    missing ids are not a hallucination here - only wrong ids and unsupported areas are.
+    """
     grounded = check_grounding(parsed, refs, hard=True, drop=False)
-    grounded = GroundedExtraction(
+    return GroundedExtraction(
         rooms=grounded.rooms,
         dropped=grounded.dropped,
         issues=[i for i in grounded.issues if i.kind != "missing_token_ids"],
         notes=grounded.notes,
     )
-    return ExtractionOutcome(Source.HYBRID, grounded, usage, refs)
 
 
 # --- rules (no LLM) ----------------------------------------------------------------------

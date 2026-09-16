@@ -29,13 +29,26 @@ sys.path.insert(0, "/app")
 
 from app.config import get_settings  # noqa: E402
 from app.llm import LlmClient, LlmError  # noqa: E402
+from app.batch import BatchItem, submit_and_wait  # noqa: E402
 from app.pipeline.extract import (  # noqa: E402
     ExtractionOutcome,
+    build_hybrid_prompt,
+    build_ocr_llm_prompt,
+    build_vlm_prompt,
+    encode_page_image,
     extract_hybrid,
     extract_ocr_llm,
     extract_rules,
     extract_vlm,
+    ground_hybrid,
+    ground_ocr_llm,
+    ground_vlm,
+    image_content,
+    system_prompt,
+    text_content,
 )
+from app.pipeline.pairing import TokenRef  # noqa: E402
+from app.schemas import Source  # noqa: E402
 from app.pipeline.ocr import OcrToken, run_ocr  # noqa: E402
 from app.pipeline.preprocess import PreprocessConfig, preprocess  # noqa: E402
 from app.pipeline.room_types import label_key  # noqa: E402
@@ -100,6 +113,52 @@ def score(outcome: ExtractionOutcome, labels: set[str], areas: list[float]) -> t
     return matched_labels, matched_areas
 
 
+def build_batch_item(
+    approach: str, plan_id: str, tokens, image, settings
+) -> BatchItem:
+    """One batch request for (plan, approach), using the same prompts as the sync path."""
+    refs = TokenRef.from_tokens(tokens)
+    if approach == "ocr+llm":
+        model = settings.anthropic_text_model
+        messages = [{"role": "user", "content": build_ocr_llm_prompt(refs)}]
+    else:
+        model = settings.anthropic_vision_model
+        encoded, width, height = encode_page_image(
+            image, settings.vlm_max_image_px, settings.vlm_jpeg_quality
+        )
+        prompt = (
+            build_vlm_prompt(width, height)
+            if approach == "vlm"
+            else build_hybrid_prompt(refs, width, height)
+        )
+        messages = [{
+            "role": "user",
+            "content": [text_content(prompt), image_content(encoded)],
+        }]
+    return BatchItem(
+        custom_id=f"{plan_id}|{approach}",
+        model=model,
+        system=system_prompt(),
+        messages=messages,
+        max_tokens=settings.anthropic_max_tokens,
+    )
+
+
+def ground_for(approach: str, parsed, refs):
+    if approach == "ocr+llm":
+        return ground_ocr_llm(parsed, refs)
+    if approach == "vlm":
+        return ground_vlm(parsed, refs)
+    return ground_hybrid(parsed, refs)
+
+
+_SOURCE_FOR = {
+    "ocr+llm": Source.OCR_LLM,
+    "vlm": Source.VLM,
+    "hybrid": Source.HYBRID,
+}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=6,
@@ -118,6 +177,8 @@ def main() -> int:
     parser.add_argument("--out", type=Path,
                         default=Path("/eval/results/tier3_cost_probe.md"))
     parser.add_argument("--force", action="store_true", help="ignore cached LLM responses")
+    parser.add_argument("--batch", action="store_true",
+                        help="use the Message Batches API (50%% of standard rates)")
     args = parser.parse_args()
 
     settings = get_settings()
@@ -159,6 +220,99 @@ def main() -> int:
     ref_totals = {"labels": 0, "areas_svg": 0, "areas_printed": 0}
     spend = {"total": 0.0, "worst_page": 0.0}
     stop_reason: str | None = None
+
+    # ---- batch pass -------------------------------------------------------------------
+    # Submits every uncached (plan, approach) in one batch at half price, then fills the
+    # cache so the loop below reads results rather than paying again. `rules` never goes to
+    # the API.
+    if args.batch:
+        batch_approaches = [a for a in args.approaches if a != "rules"]
+        pending: list = []
+        for entry in entries:
+            directory = plan_dir(args.dataset, entry)
+            plan_id = directory.name
+            tokens = ocr_tokens_cached(directory / "F1_scaled.png", plan_id)
+            image = None
+            for approach in batch_approaches:
+                cache = CACHE_DIR / approach.replace("+", "_") / f"{plan_id}.json"
+                if cache.exists() and not args.force:
+                    continue
+                if image is None and approach != "ocr+llm":
+                    image = cv2.imread(str(directory / "F1_scaled.png"))
+                pending.append((
+                    plan_id, approach, tokens,
+                    build_batch_item(approach, plan_id, tokens, image, settings),
+                ))
+
+        if pending:
+            # Project the bill before submitting. A batch is paid for as a whole, so the
+            # per-call spend cap cannot stop it midway - the check has to happen here.
+            per_page = {"ocr+llm": 0.00618, "vlm": 0.00749, "hybrid": 0.00882}
+            projected = sum(
+                per_page.get(approach, 0.010) * pricing.batch_multiplier
+                for _, approach, _, _ in pending
+            )
+            print(f"\nbatch: {len(pending)} requests, projected "
+                  f"${projected:.4f} at {pricing.batch_multiplier:.0%} of standard rates")
+            if args.max_spend is not None and projected > args.max_spend:
+                print(f"REFUSING to submit: projected ${projected:.4f} exceeds the "
+                      f"${args.max_spend:.2f} cap", file=sys.stderr)
+                return 2
+
+            client = get_client()
+            if client is None:
+                return 2
+
+            print("submitting batch and waiting (this takes minutes, not seconds)...")
+            outcomes = submit_and_wait(
+                client.raw,
+                [item for _, _, _, item in pending],
+                on_progress=lambda b: print(f"  batch {b.id}: {b.processing_status}"),
+            )
+
+            for plan_id, approach, tokens, item in pending:
+                outcome = outcomes.get(item.custom_id)
+                directory = plan_dir(args.dataset, f"/high_quality_architectural/{plan_id}/")
+                labels, areas = reference(directory / "model.svg")
+                n_printed = printed.get(plan_id, {}).get("printed_area_count", 0)
+                cache = CACHE_DIR / approach.replace("+", "_") / f"{plan_id}.json"
+                cache.parent.mkdir(parents=True, exist_ok=True)
+
+                if outcome is None or not outcome.ok:
+                    error = outcome.error if outcome else "missing from batch results"
+                    cache.write_text(json.dumps(
+                        {"plan": plan_id, "ok": False, "error": error, "latency_ms": 0,
+                         "batch": True}, indent=2), encoding="utf-8")
+                    print(f"  {plan_id} {approach}: FAILED {error}")
+                    continue
+
+                refs = TokenRef.from_tokens(tokens)
+                grounded = ground_for(approach, outcome.parsed, refs)
+                scored = ExtractionOutcome(
+                    _SOURCE_FOR[approach], grounded, outcome.usage, refs
+                )
+                matched_labels, matched_areas = score(scored, labels, areas)
+                cost = pricing.cost_usd(
+                    outcome.usage.model, outcome.usage.input_tokens,
+                    outcome.usage.output_tokens, outcome.usage.cache_read_tokens,
+                    outcome.usage.cache_write_tokens, batch=True,
+                )
+                row = {
+                    "plan": plan_id, "ok": True, "batch": True,
+                    "rooms": len(scored.rooms),
+                    "labels": matched_labels, "ref_labels": len(labels),
+                    "areas": matched_areas, "printed_areas": n_printed,
+                    "areas_on_printing_plans": matched_areas if n_printed else 0,
+                    "spurious_areas": 0 if n_printed else matched_areas,
+                    "hallucinations": scored.hallucinations,
+                    "input_tokens": outcome.usage.input_tokens,
+                    "output_tokens": outcome.usage.output_tokens,
+                    "latency_ms": 0,  # asynchronous; per-request latency is not meaningful
+                    "cost_usd": cost,
+                    "attempts": 1,
+                }
+                cache.write_text(json.dumps(row, indent=2), encoding="utf-8")
+            print("batch complete; results cached\n")
 
     for entry in entries:
         if stop_reason:
