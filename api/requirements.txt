@@ -1,4 +1,4 @@
-# ---- Phase 0 base ----
+# ---- Base ----
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic==2.10.4
@@ -8,10 +8,17 @@ alembic==1.14.0
 psycopg[binary]==3.2.3
 python-multipart==0.0.20
 
-# ---- Phase 1 (CV/OCR) ----
-# PaddleOCR is a heavy install. It is added at the start of Phase 1 so a failure there
-# is isolated and visible, rather than silently breaking the Phase 0 scaffold.
-# opencv-python-headless, pymupdf, paddleocr, paddlepaddle
+# ---- CV / OCR ----
+# Pinned to an exact pair. PaddleOCR 2.x and 3.x have incompatible APIs
+# (2.x: ocr.ocr(img, cls=True) -> nested lists; 3.x: ocr.predict(img) -> result dicts
+# with rec_texts/rec_scores/rec_polys). We target 3.x and pin both halves so an
+# upstream minor release cannot silently switch the API under us.
+# paddleocr 3.4.1 pulls paddlex 3.4.x, which is the piece that actually resolves models.
+paddlepaddle==3.1.1
+paddleocr==3.4.1
+opencv-python-headless==4.10.0.84
+pymupdf==1.25.1
+numpy==1.26.4
 
 # ---- Phase 3 (LLM) ----
 # openai

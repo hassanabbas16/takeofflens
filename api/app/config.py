@@ -23,8 +23,40 @@ class Settings(BaseSettings):
     dataset_dir: Path = Path("/data/cubicasa5k")
     dataset_coco_dir: Path = Path("/data/cubicasa5k_coco")
 
+    # ---- Ingest ----
+    # PDF render DPI. 300 is the spec default; lower it for cheap smoke runs.
+    ingest_dpi: int = 300
+
+    # ---- Preprocess ----
+    # Every step is individually toggleable so eval can ablate them (Phase 6).
+    # Defaults are set from a measured sweep on a CubiCasa architectural plan; see
+    # docs in preprocess.py for why adaptive threshold defaults off.
+    preprocess_grayscale: bool = False
+    preprocess_denoise: bool = False
+    preprocess_adaptive_threshold: bool = False
+    preprocess_deskew: bool = False
+    preprocess_upscale: bool = False
+    preprocess_upscale_min_short_side: int = 2000
+
+    # ---- OCR ----
+    ocr_lang: str = "en"
+    # Orientations (degrees) each page is OCR'd at, then merged. Floor plan labels are
+    # frequently set at 90 degrees, and a single pass misses most of them.
+    ocr_orientations: str = "0,90,180,270"
+    # Detection input cap. Counter-intuitively the default 1536 beats larger values on
+    # these drawings; see ocr.py.
+    ocr_det_limit_side_len: int = 1536
+    ocr_det_limit_type: str = "max"
+    ocr_min_confidence: float = 0.5
+    # IoU above which two boxes from different orientation passes are the same token.
+    ocr_dedup_iou: float = 0.5
+
     max_upload_mb: int = 20
     cors_origins: str = "http://localhost:3000"
+
+    @property
+    def ocr_orientation_list(self) -> list[int]:
+        return [int(a) for a in self.ocr_orientations.split(",") if a.strip()]
 
     @property
     def cors_origin_list(self) -> list[str]:

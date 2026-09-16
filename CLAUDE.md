@@ -136,6 +136,12 @@ takeofflens/
 - `pages`: id, plan_id, page_number, image_path, width, height
 - `ocr_tokens`: id, page_id, text, confidence, bbox (x1,y1,x2,y2 as ints)
 - `rooms`: id, page_id, name, room_type, width_m, length_m, area_m2, source ("ocr+llm" | "vlm"), raw_text, bbox (nullable)
+  - **`area_m2` is the primary extracted field.** Finnish plans print a single area under the
+    room label (`MH 11.7`), so area is what is actually on the page.
+  - `width_m` and `length_m` are **nullable and never derived**. They are populated only when
+    the page genuinely prints a `width x length` pair. Never back out a width and length from
+    an area (no square roots, no assumed aspect ratio), and never infer an area from a
+    dimension pair that was not printed. A null here is a real measurement, not a gap to fill.
 - `llm_calls`: id, page_id, purpose, model, input_tokens, output_tokens, latency_ms, created_at (for cost/latency reporting)
 
 ## Pipeline requirements
@@ -286,8 +292,14 @@ All tiers read plans from the mounted `DATASET_DIR`. None of them copy image dat
 ### Tier 3 — OpenAI approaches on the test split, cost-gated
 `eval/tier3_llm.py`
 
-Runs both `ocr+llm` and `vlm` over the **test split only** (399 plans), reusing the Tier 1 OCR
-cache so no OCR is recomputed. LLM responses are cached per (plan, approach, model) under
+Runs both `ocr+llm` and `vlm` over the **`high_quality_architectural` test plans only**
+(~270 of the 399 test plans), reusing the Tier 1 OCR cache so no OCR is recomputed.
+
+`colorful` and `high_quality` are **excluded from all LLM runs and accuracy metrics**: the
+former has no text on the page at all, the latter has room labels but essentially no areas or
+dimensions, so neither can support a dimension/area metric and paying for LLM calls on them
+would buy nothing. They stay in Tier 1 reporting, and `results.md` states this exclusion and
+the reason next to every affected table. LLM responses are cached per (plan, approach, model) under
 `eval/cache/llm/` and are resumable on the same terms as Tier 1.
 
 **Cost gate — this is a hard stop:**
@@ -296,9 +308,9 @@ cache so no OCR is recomputed. LLM responses are cached per (plan, approach, mod
 2. Write `eval/results/tier3_cost_probe.md` from the `llm_calls` table and
    `eval/pricing.yaml`: measured input/output tokens per page, **measured cost per page for
    each approach separately**, measured latency per page, and the extrapolated cost of the
-   full 399-plan run for both approaches.
+   full ~270-plan run for both approaches.
 3. **Stop. Report the measured numbers and wait for explicit approval before the remaining
-   379 plans.** Do not continue automatically, and do not treat `--limit 20` finishing
+   ~250 plans.** Do not continue automatically, and do not treat `--limit 20` finishing
    cleanly as approval. The full run is gated behind an explicit `--approved-budget` flag so
    it cannot start by accident.
 
@@ -331,7 +343,8 @@ Only this tier's numbers are described as hand-verified in the README.
 
 Per approach (`ocr+llm` vs `vlm`) and per preprocessing config:
 - OCR token recall for room labels (vs Tier 2 name labels)
-- room detection precision / recall / F1, fuzzy name match (vs Tier 2, whole test split)
+- room detection precision / recall / F1, fuzzy name match (vs Tier 2,
+  `high_quality_architectural` test plans)
 - room-type accuracy (vs Tier 2, `Undefined` excluded and reported separately)
 - dimension and area accuracy within 5% tolerance — **Tier 4 gold set only**, n=15, and the
   n is printed next to every number
@@ -365,13 +378,21 @@ run, its numbers are absent — never placeholders, never estimates.
   - Export to ONNX, run it in the pipeline with ONNX Runtime (CPU), `source="detector"`.
   - Compare against `ocr+llm` and `vlm` in `eval/results.md` on accuracy, latency and cost
     (the detector's marginal cost per page is zero, which is the point of the comparison).
-  - **Blocker to resolve before starting:** the supplied COCO files contain only two
-    categories, `wall` and `room` - there are **no door or window annotations** in them
-    (verified across all three splits: train 173023 anns, val 15926, test 16818, categories
-    `['wall','room']`). A room/door/window detector cannot be trained from the COCO files
-    alone. `model.svg` does carry `Door Swing *` and `Window *` geometry, so the options are
-    (a) ship a wall/room detector from COCO as-is, or (b) generate door/window boxes from
-    `model.svg` first and train on the union. Decide before any training starts.
+  - **Classes: `wall`, `room`, `door`, `window`** — the union of the supplied COCO
+    annotations and geometry derived from `model.svg`.
+  - **Step 8a, SVG -> COCO conversion, is its own deliverable** (`eval/svg_to_coco.py`),
+    done and verified before any training:
+    - The supplied COCO files carry only `wall` and `room` (verified across all three
+      splits: train 173023 anns, val 15926, test 16818, categories `['wall','room']`).
+      Door and window boxes do not exist there and must be generated.
+    - `model.svg` carries `Door Swing *` and `Window *` geometry. Convert those to boxes and
+      merge with the existing `wall`/`room` annotations into a 4-class COCO file.
+    - The SVG is in model space at 100 units/m; COCO boxes are in `F1_original.png` pixel
+      space. The conversion must derive and verify the per-plan transform, not assume one,
+      and drop plans where it cannot be verified rather than emit silently wrong boxes.
+    - Validate by rendering boxes over the page for a sample and eyeballing them, and report
+      how many plans converted, how many were dropped, and why.
+    - Write the converted set to a new file. **Never rewrite the supplied annotations.**
   - Also note: COCO `file_name` values are absolute Kaggle paths
     (`/kaggle/input/cubicasa5k/...`). Remap to `DATASET_DIR` at load time; do not rewrite the
     annotation files.

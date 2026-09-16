@@ -12,6 +12,7 @@ venv/
 
 # Storage + eval artifacts
 storage/
+api/_debug/
 eval/cache/
 eval/results/*.json
 eval/labelling/

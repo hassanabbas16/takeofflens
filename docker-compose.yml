@@ -26,11 +26,17 @@ services:
       DATASET_DIR: ${DATASET_MOUNT:-/data/cubicasa5k}
       DATASET_COCO_DIR: ${DATASET_COCO_MOUNT:-/data/cubicasa5k_coco}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-20}
+      # Weights are baked into the image at build time; this stops Paddle probing the
+      # model host on every process start.
+      PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: "True"
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
     volumes:
       - ./api:/app
       - ./eval:/eval
       - takeoff_storage:/storage
+      # Named volume for OCR weights. The image already carries them, so this only
+      # persists anything a newer model pulls at runtime.
+      - ocr_models:/root/.paddlex
       # Dataset is mounted read-only and never copied into the repo.
       - ${DATASET_DIR}:${DATASET_MOUNT:-/data/cubicasa5k}:ro
       - ${DATASET_COCO_DIR}:${DATASET_COCO_MOUNT:-/data/cubicasa5k_coco}:ro
@@ -58,3 +64,4 @@ services:
 volumes:
   pgdata:
   takeoff_storage:
+  ocr_models:
