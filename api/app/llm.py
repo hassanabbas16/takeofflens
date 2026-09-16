@@ -1,21 +1,30 @@
-"""Thin OpenAI client wrapper: retries, timeouts, token and cost logging.
+"""Thin Anthropic client wrapper: retries, timeouts, token and cost logging.
 
 Deliberately thin. It knows how to call the API, how to record what the call cost, and how
 to retry once on a schema failure. It knows nothing about floor plans - that lives in the
 pipeline modules.
 
-Two things it does handle that are easy to get wrong:
+Structured outputs use ``client.messages.parse(..., output_format=PydanticModel)``, which
+constrains the response to the schema and returns a validated instance on
+``response.parsed_output``.
 
-**Models that reject ``temperature``.** The newest models (gpt-6-astra and later) reject
-``temperature``, ``top_p`` and ``top_logprobs`` outright rather than ignoring them. The spec
-asks for temperature 0 for determinism, so the wrapper sends it when supported and drops it
-when not, rather than hardcoding a model list that goes stale: the first call sends the
-parameter, and a rejection is caught, remembered per model, and retried without it. That
-costs at most one failed call per model per process.
+Three things it handles that are easy to get wrong:
+
+**Models that reject ``temperature``.** Claude Sonnet 5 and Opus 5 removed the sampling
+parameters and return a 400 if you send them; Haiku 4.5 still accepts them. On top of that,
+``messages.parse()`` does not expose ``temperature`` at all, so when configured it goes
+through ``extra_body``. The wrapper sends it when configured, and on a rejection remembers
+that model and retries without it, rather than carrying a hardcoded model list that goes
+stale. Costs at most one failed call per model per process.
+
+**``max_tokens`` is required.** Unlike the OpenAI API it is not optional, and hitting it
+truncates the extraction mid-room. The cap is configurable, and a ``max_tokens`` stop reason
+is treated as a failure worth retrying rather than as a usable result - a truncated room list
+is worse than none, because it looks like a complete answer.
 
 **Cost is never computed here.** The wrapper records token counts; prices live in
-``eval/pricing.yaml`` with the date they were taken. Pricing changes should never require a
-code change, and a logged token count stays true whatever the price does later.
+``eval/pricing.yaml`` with the date they were taken. Anthropic reports cache reads and cache
+writes as separate counters that are *not* included in ``input_tokens`` - see app/pricing.py.
 """
 
 from __future__ import annotations
@@ -33,21 +42,22 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
-# Models observed to reject temperature. Populated at runtime from API errors rather than
-# hardcoded, so a new model does not need a code change.
+# Models observed to reject sampling parameters. Populated at runtime from API errors rather
+# than hardcoded, so a new model does not need a code change.
 _NO_TEMPERATURE: set[str] = set()
 
 _TEMPERATURE_REJECTED_MARKERS = (
     "unsupported parameter",
-    "unsupported_parameter",
+    "unexpected keyword",
     "does not support",
-    "unrecognized request argument",
-    "not supported with this model",
+    "not supported",
+    "unrecognized",
+    "removed",
 )
 
 
 class LlmError(RuntimeError):
-    """Raised when a call cannot be completed. Callers must catch this - jobs never crash."""
+    """Raised when a call cannot be set up. Callers must catch this - jobs never crash."""
 
 
 @dataclass
@@ -55,11 +65,14 @@ class LlmUsage:
     model: str
     input_tokens: int = 0
     output_tokens: int = 0
-    cached_input_tokens: int = 0
+    # Anthropic reports these separately from input_tokens, and prices them differently.
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     latency_ms: int = 0
     ok: bool = True
     error: str | None = None
     attempts: int = 1
+    stop_reason: str | None = None
 
 
 @dataclass
@@ -72,13 +85,13 @@ class LlmResult(Generic[T]):
         return self.parsed is not None
 
 
-def _looks_like_temperature_rejection(message: str) -> bool:
+def _looks_like_parameter_rejection(message: str) -> bool:
     lowered = message.lower()
     return "temperature" in lowered and any(m in lowered for m in _TEMPERATURE_REJECTED_MARKERS)
 
 
 class LlmClient:
-    """Wraps the OpenAI SDK for Structured Outputs calls."""
+    """Wraps the Anthropic SDK for Structured Outputs calls."""
 
     def __init__(
         self,
@@ -87,70 +100,70 @@ class LlmClient:
         client: Any = None,
     ) -> None:
         settings = get_settings()
-        self._timeout = timeout if timeout is not None else settings.openai_timeout_seconds
-        self._max_retries = settings.openai_max_retries
+        self._timeout = timeout if timeout is not None else settings.anthropic_timeout_seconds
+        self._max_retries = settings.anthropic_max_retries
+        self._max_tokens = settings.anthropic_max_tokens
         if client is not None:
             # Injected for tests; avoids importing the SDK or needing a key.
             self._client = client
             return
-        key = api_key or settings.openai_api_key
-        if not key or key == "sk-replace-me":
+        key = api_key or settings.anthropic_api_key
+        if not key or key.startswith("sk-ant-replace"):
             raise LlmError(
-                "OPENAI_API_KEY is not set. Put a real key in .env; "
+                "ANTHROPIC_API_KEY is not set. Put a real key in .env; "
                 ".env.example ships a placeholder on purpose."
             )
-        from openai import OpenAI
+        import anthropic
 
-        self._client = OpenAI(api_key=key, timeout=self._timeout)
+        # max_retries=0: retries are handled here so every attempt's tokens get counted.
+        self._client = anthropic.Anthropic(api_key=key, timeout=self._timeout, max_retries=0)
 
-    def _usage_from_response(self, response: Any, model: str) -> tuple[int, int, int]:
+    def _usage_from_response(self, response: Any) -> tuple[int, int, int, int]:
         usage = getattr(response, "usage", None)
         if usage is None:
-            return 0, 0, 0
-        input_tokens = getattr(usage, "input_tokens", None)
-        if input_tokens is None:
-            input_tokens = getattr(usage, "prompt_tokens", 0) or 0
-        output_tokens = getattr(usage, "output_tokens", None)
-        if output_tokens is None:
-            output_tokens = getattr(usage, "completion_tokens", 0) or 0
-        cached = 0
-        details = getattr(usage, "input_tokens_details", None) or getattr(
-            usage, "prompt_tokens_details", None
+            return 0, 0, 0, 0
+        return (
+            int(getattr(usage, "input_tokens", 0) or 0),
+            int(getattr(usage, "output_tokens", 0) or 0),
+            int(getattr(usage, "cache_read_input_tokens", 0) or 0),
+            int(getattr(usage, "cache_creation_input_tokens", 0) or 0),
         )
-        if details is not None:
-            cached = getattr(details, "cached_tokens", 0) or 0
-        return int(input_tokens), int(output_tokens), int(cached)
 
     def _call_once(
         self,
         *,
         model: str,
+        system: str | None,
         messages: list[dict[str, Any]],
         schema: type[T],
         temperature: float | None,
-    ) -> tuple[T | None, Any]:
+    ) -> tuple[T | None, Any, str | None]:
         kwargs: dict[str, Any] = {
             "model": model,
-            "input": messages,
-            "text_format": schema,
+            "max_tokens": self._max_tokens,
+            "messages": messages,
+            "output_format": schema,
         }
+        if system:
+            kwargs["system"] = system
+        # messages.parse() has no temperature parameter, so it rides in extra_body.
         if temperature is not None and model not in _NO_TEMPERATURE:
-            kwargs["temperature"] = temperature
+            kwargs["extra_body"] = {"temperature": temperature}
 
         try:
-            response = self._client.responses.parse(**kwargs)
+            response = self._client.messages.parse(**kwargs)
         except Exception as exc:
             message = str(exc)
-            if "temperature" in kwargs and _looks_like_temperature_rejection(message):
-                # Remember, so every later call for this model skips the parameter.
+            if "extra_body" in kwargs and _looks_like_parameter_rejection(message):
                 _NO_TEMPERATURE.add(model)
                 logger.info("model %s rejects temperature; retrying without it", model)
-                kwargs.pop("temperature")
-                response = self._client.responses.parse(**kwargs)
+                kwargs.pop("extra_body")
+                response = self._client.messages.parse(**kwargs)
             else:
                 raise
 
-        return getattr(response, "output_parsed", None), response
+        stop_reason = getattr(response, "stop_reason", None)
+        return getattr(response, "parsed_output", None), response, stop_reason
 
     def parse(
         self,
@@ -158,7 +171,8 @@ class LlmClient:
         model: str,
         messages: list[dict[str, Any]],
         schema: type[T],
-        temperature: float | None = 0.0,
+        system: str | None = None,
+        temperature: float | None = None,
         purpose: str = "",
     ) -> LlmResult[T]:
         """Call the model and parse into ``schema``.
@@ -174,17 +188,35 @@ class LlmClient:
         for attempt in range(1, self._max_retries + 2):
             usage.attempts = attempt
             try:
-                parsed, response = self._call_once(
-                    model=model, messages=messages, schema=schema, temperature=temperature
+                parsed, response, stop_reason = self._call_once(
+                    model=model,
+                    system=system,
+                    messages=messages,
+                    schema=schema,
+                    temperature=temperature,
                 )
-                inp, out, cached = self._usage_from_response(response, model)
+                inp, out, cache_read, cache_write = self._usage_from_response(response)
                 # Accumulate: a retry costs real tokens and must show up in the cost report.
                 usage.input_tokens += inp
                 usage.output_tokens += out
-                usage.cached_input_tokens += cached
+                usage.cache_read_tokens += cache_read
+                usage.cache_write_tokens += cache_write
+                usage.stop_reason = stop_reason
 
+                if stop_reason == "refusal":
+                    last_error = "model declined the request (stop_reason=refusal)"
+                    logger.warning("%s attempt %d: %s", purpose or model, attempt, last_error)
+                    continue
+                if stop_reason == "max_tokens":
+                    # A truncated extraction is worse than none - it looks complete.
+                    last_error = (
+                        f"output hit max_tokens ({self._max_tokens}); "
+                        "the extraction would be truncated"
+                    )
+                    logger.warning("%s attempt %d: %s", purpose or model, attempt, last_error)
+                    continue
                 if parsed is None:
-                    last_error = "model returned no parsed output (refusal or empty)"
+                    last_error = "model returned no parsed output"
                     logger.warning("%s attempt %d: %s", purpose or model, attempt, last_error)
                     continue
 

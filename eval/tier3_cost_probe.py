@@ -7,7 +7,7 @@ approach, and then stops. It never continues to a larger run on its own.
     python eval/tier3_cost_probe.py                 # the 6 validation plans
     python eval/tier3_cost_probe.py --approaches vlm
 
-Requires OPENAI_API_KEY. Costs real money - roughly one text call and two vision calls per
+Requires ANTHROPIC_API_KEY. Costs real money - roughly one text call and two vision calls per
 plan. Results are cached per (plan, approach, model) so a re-run after a crash does not pay
 twice; use --force to ignore the cache.
 """
@@ -116,9 +116,9 @@ def main() -> int:
     entries = [e for e in read_split(args.dataset, "test")
                if e.strip("/").startswith("high_quality_architectural")][: args.limit]
 
-    print(f"models: text={settings.openai_text_model} vision={settings.openai_vision_model}")
+    print(f"models: text={settings.anthropic_text_model} vision={settings.anthropic_vision_model}")
     print(f"pricing: {pricing.source} checked {pricing.checked} ({pricing.mode} mode)")
-    for model in {settings.openai_text_model, settings.openai_vision_model}:
+    for model in {settings.anthropic_text_model, settings.anthropic_vision_model}:
         if not pricing.knows(model):
             print(f"WARNING: no pricing for {model!r}; cost will be reported as unknown")
     print(f"plans: {len(entries)}   approaches: {args.approaches}\n")
@@ -142,6 +142,23 @@ def main() -> int:
 
         for approach in args.approaches:
             cache = CACHE_DIR / approach.replace("+", "_") / f"{plan_id}.json"
+            if cache.exists() and not args.force:
+                row = json.loads(cache.read_text(encoding="utf-8"))
+                # Backfill fields added after a cache entry was written, so an older cache
+                # does not silently report zeros.
+                if row.get("ok") and "areas_on_printing_plans" not in row:
+                    matched = row.get("areas", 0)
+                    printed_here = row.get("printed_areas", 0)
+                    row["areas_on_printing_plans"] = matched if printed_here else 0
+                    row["spurious_areas"] = 0 if printed_here else matched
+                results[approach].append(row)
+                cost_str = (
+                    f"${row['cost_usd']:.5f}" if row.get("cost_usd") is not None else "unknown"
+                )
+                print(f"  {approach:<8} (cached) labels={row.get('labels')}/{len(labels)} "
+                      f"areas={row.get('areas')}/{n_printed} "
+                      f"halluc={row.get('hallucinations')} {cost_str}")
+                continue
             started = time.time()
             if approach == "ocr+llm":
                 outcome = extract_ocr_llm(tokens, client)
@@ -167,13 +184,18 @@ def main() -> int:
                 outcome.usage.model,
                 outcome.usage.input_tokens,
                 outcome.usage.output_tokens,
-                outcome.usage.cached_input_tokens,
+                outcome.usage.cache_read_tokens,
+                outcome.usage.cache_write_tokens,
             )
             row = {
                 "plan": plan_id, "ok": True,
                 "rooms": len(outcome.rooms),
                 "labels": matched_labels, "ref_labels": len(labels),
                 "areas": matched_areas, "printed_areas": n_printed,
+                # An area "matched" on a plan that prints none is a number that happened to
+                # land within tolerance of a polygon area - a false positive, not a hit.
+                "areas_on_printing_plans": matched_areas if n_printed else 0,
+                "spurious_areas": 0 if n_printed else matched_areas,
                 "hallucinations": outcome.hallucinations,
                 "input_tokens": outcome.usage.input_tokens,
                 "output_tokens": outcome.usage.output_tokens,
@@ -194,15 +216,15 @@ def main() -> int:
     lines: list[str] = []
     lines.append("# Tier 3 cost probe\n")
     lines.append(f"- Plans: {len(entries)} `high_quality_architectural` test plans")
-    lines.append(f"- Text model: `{settings.openai_text_model}`")
-    lines.append(f"- Vision model: `{settings.openai_vision_model}`")
+    lines.append(f"- Text model: `{settings.anthropic_text_model}`")
+    lines.append(f"- Vision model: `{settings.anthropic_vision_model}`")
     lines.append(f"- Pricing: {pricing.source}, checked {pricing.checked}, {pricing.mode} mode")
     lines.append(f"- Reference: {ref_totals['labels']} labels, "
                  f"{ref_totals['areas_printed']} areas actually printed "
                  f"({ref_totals['areas_svg']} rooms in the SVG annotation)\n")
-    lines.append("| Approach | Labels | Areas (printed) | Hallucinations | "
+    lines.append("| Approach | Labels | Areas (printed) | Spurious areas | Hallucinations | "
                  "Mean latency | Mean cost/page | Total |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
 
     print("\n" + "=" * 78)
     print("SUMMARY")
@@ -210,11 +232,12 @@ def main() -> int:
     for approach in args.approaches:
         rows = [r for r in results[approach] if r.get("ok")]
         if not rows:
-            lines.append(f"| {approach} | all calls failed | | | | | |")
+            lines.append(f"| {approach} | all calls failed | | | | | | |")
             print(f"{approach}: all calls failed")
             continue
         labels = sum(r["labels"] for r in rows)
-        areas = sum(r["areas"] for r in rows)
+        areas = sum(r.get("areas_on_printing_plans", 0) for r in rows)
+        spurious = sum(r.get("spurious_areas", 0) for r in rows)
         halluc = sum(r["hallucinations"] for r in rows)
         latency = statistics.mean(r["latency_ms"] for r in rows)
         costs = [r["cost_usd"] for r in rows if r["cost_usd"] is not None]
@@ -224,12 +247,13 @@ def main() -> int:
         total_cell = f"${total_cost:.4f}" if total_cost is not None else "unknown"
         lines.append(
             f"| {approach} | {labels}/{ref_totals['labels']} | "
-            f"{areas}/{ref_totals['areas_printed']} | {halluc} | "
+            f"{areas}/{ref_totals['areas_printed']} | {spurious} | {halluc} | "
             f"{latency / 1000:.1f}s | {cost_cell} | {total_cell} |"
         )
         print(f"{approach:<8} labels={labels}/{ref_totals['labels']} "
-              f"areas={areas}/{ref_totals['areas_printed']} halluc={halluc} "
-              f"latency={latency / 1000:.1f}s cost/page={cost_cell} total={total_cell}")
+              f"areas={areas}/{ref_totals['areas_printed']} spurious={spurious} "
+              f"halluc={halluc} latency={latency / 1000:.1f}s cost/page={cost_cell} "
+              f"total={total_cell}")
 
     lines.append("\n## Extrapolation\n")
     lines.append("Cost of the full `high_quality_architectural` test split "

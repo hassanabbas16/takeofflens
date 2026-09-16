@@ -27,7 +27,7 @@ from app.schemas import ExtractedRoom, PlanExtraction, RoomType
 # --- fakes -----------------------------------------------------------------------------
 
 
-class FakeResponses:
+class FakeMessages:
     def __init__(self, behaviours):
         self.behaviours = list(behaviours)
         self.calls = []
@@ -42,16 +42,25 @@ class FakeResponses:
 
 class FakeClient:
     def __init__(self, behaviours):
-        self.responses = FakeResponses(behaviours)
+        self.messages = FakeMessages(behaviours)
 
 
-def response(parsed, input_tokens=100, output_tokens=50, cached=0):
+def response(
+    parsed,
+    input_tokens=100,
+    output_tokens=50,
+    cache_read=0,
+    cache_write=0,
+    stop_reason="end_turn",
+):
     return SimpleNamespace(
-        output_parsed=parsed,
+        parsed_output=parsed,
+        stop_reason=stop_reason,
         usage=SimpleNamespace(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            input_tokens_details=SimpleNamespace(cached_tokens=cached),
+            cache_read_input_tokens=cache_read,
+            cache_creation_input_tokens=cache_write,
         ),
     )
 
@@ -127,39 +136,90 @@ def test_retry_tokens_are_accumulated_not_replaced():
     assert result.usage.output_tokens == 60
 
 
-def test_temperature_sent_by_default():
+def test_temperature_sent_via_extra_body():
+    """messages.parse() has no temperature parameter, so it rides in extra_body."""
     extraction = PlanExtraction(rooms=[], notes=None)
     fake = FakeClient([response(extraction)])
     LlmClient(client=fake).parse(
         model="m", messages=[], schema=PlanExtraction, temperature=0.0
     )
-    assert fake.responses.calls[0]["temperature"] == 0.0
+    assert fake.messages.calls[0]["extra_body"] == {"temperature": 0.0}
+
+
+def test_max_tokens_always_sent():
+    """The Messages API requires it; omitting it is a 400."""
+    extraction = PlanExtraction(rooms=[], notes=None)
+    fake = FakeClient([response(extraction)])
+    LlmClient(client=fake).parse(model="m", messages=[], schema=PlanExtraction)
+    assert fake.messages.calls[0]["max_tokens"] > 0
+
+
+def test_system_prompt_passed_through():
+    extraction = PlanExtraction(rooms=[], notes=None)
+    fake = FakeClient([response(extraction)])
+    LlmClient(client=fake).parse(
+        model="m", messages=[], schema=PlanExtraction, system="rules"
+    )
+    assert fake.messages.calls[0]["system"] == "rules"
+
+
+def test_max_tokens_stop_reason_is_a_failure_not_a_result():
+    """A truncated room list looks complete, so it must not be accepted."""
+    extraction = PlanExtraction(rooms=[room()], notes=None)
+    fake = FakeClient([
+        response(extraction, stop_reason="max_tokens"),
+        response(extraction, stop_reason="max_tokens"),
+    ])
+    result = LlmClient(client=fake).parse(model="m", messages=[], schema=PlanExtraction)
+    assert not result.ok
+    assert "max_tokens" in result.usage.error
+
+
+def test_refusal_stop_reason_is_a_failure():
+    extraction = PlanExtraction(rooms=[], notes=None)
+    fake = FakeClient([
+        response(extraction, stop_reason="refusal"),
+        response(extraction, stop_reason="refusal"),
+    ])
+    result = LlmClient(client=fake).parse(model="m", messages=[], schema=PlanExtraction)
+    assert not result.ok
+    assert "refusal" in result.usage.error
+
+
+def test_cache_counters_recorded_separately():
+    """Anthropic reports cache reads/writes outside input_tokens; both must be kept."""
+    extraction = PlanExtraction(rooms=[], notes=None)
+    fake = FakeClient([response(extraction, 100, 50, cache_read=900, cache_write=40)])
+    result = LlmClient(client=fake).parse(model="m", messages=[], schema=PlanExtraction)
+    assert result.usage.input_tokens == 100
+    assert result.usage.cache_read_tokens == 900
+    assert result.usage.cache_write_tokens == 40
 
 
 def test_temperature_rejection_is_detected_and_retried_without_it():
     extraction = PlanExtraction(rooms=[], notes=None)
     rejection = RuntimeError(
-        "Unsupported parameter: 'temperature' is not supported with this model."
+        "temperature: Unsupported parameter - sampling parameters were removed on this model."
     )
     fake = FakeClient([rejection, response(extraction)])
     result = LlmClient(client=fake).parse(
-        model="gpt-6-astra", messages=[], schema=PlanExtraction, temperature=0.0
+        model="claude-sonnet-5", messages=[], schema=PlanExtraction, temperature=0.0
     )
     assert result.ok
-    assert "temperature" in fake.responses.calls[0]
-    assert "temperature" not in fake.responses.calls[1]
-    assert model_rejects_temperature("gpt-6-astra")
+    assert "extra_body" in fake.messages.calls[0]
+    assert "extra_body" not in fake.messages.calls[1]
+    assert model_rejects_temperature("claude-sonnet-5")
 
 
 def test_temperature_rejection_is_remembered_for_later_calls():
     extraction = PlanExtraction(rooms=[], notes=None)
-    rejection = RuntimeError("Unsupported parameter: 'temperature' is not supported")
+    rejection = RuntimeError("temperature: Unsupported parameter, it was removed")
     fake = FakeClient([rejection, response(extraction), response(extraction)])
     client = LlmClient(client=fake)
-    client.parse(model="gpt-6-astra", messages=[], schema=PlanExtraction, temperature=0.0)
-    client.parse(model="gpt-6-astra", messages=[], schema=PlanExtraction, temperature=0.0)
+    client.parse(model="claude-sonnet-5", messages=[], schema=PlanExtraction, temperature=0.0)
+    client.parse(model="claude-sonnet-5", messages=[], schema=PlanExtraction, temperature=0.0)
     # Third call is the second parse; it must not have re-sent temperature.
-    assert "temperature" not in fake.responses.calls[2]
+    assert "extra_body" not in fake.messages.calls[2]
 
 
 def test_unrelated_error_is_not_mistaken_for_a_temperature_rejection():
@@ -170,8 +230,8 @@ def test_unrelated_error_is_not_mistaken_for_a_temperature_rejection():
 
 
 def test_missing_api_key_raises_clearly():
-    with pytest.raises(LlmError, match="OPENAI_API_KEY"):
-        LlmClient(api_key="sk-replace-me")
+    with pytest.raises(LlmError, match="ANTHROPIC_API_KEY"):
+        LlmClient(api_key="sk-ant-replace-me")
 
 
 # --- grounding -------------------------------------------------------------------------
@@ -313,14 +373,32 @@ def test_token_refs_use_dense_indices():
 
 def test_pricing_loads_and_computes(tmp_path):
     table = load_pricing(_pricing_file(tmp_path))
-    # 1M input + 1M output at 2.00 / 12.00
-    assert table.cost_usd("gpt-5.6-terra", 1_000_000, 1_000_000) == pytest.approx(14.0)
+    # 1M input + 1M output at 1.00 / 5.00
+    assert table.cost_usd("claude-haiku-4-5", 1_000_000, 1_000_000) == pytest.approx(6.0)
 
 
-def test_cached_input_billed_at_the_cheaper_rate(tmp_path):
+def test_cache_counters_are_summed_not_netted(tmp_path):
+    """Anthropic excludes cached tokens from input_tokens, so the counters add up.
+
+    Netting them (the OpenAI shape) would undercount by the whole cache read.
+    """
     table = load_pricing(_pricing_file(tmp_path))
-    # 1M input of which 1M cached, at 0.20, plus no output.
-    assert table.cost_usd("gpt-5.6-terra", 1_000_000, 0, 1_000_000) == pytest.approx(0.20)
+    cost = table.cost_usd(
+        "claude-haiku-4-5",
+        input_tokens=1_000_000,
+        output_tokens=0,
+        cache_read_tokens=1_000_000,
+        cache_write_tokens=1_000_000,
+    )
+    # 1.00 base + 0.10 read + 1.25 write
+    assert cost == pytest.approx(2.35)
+
+
+def test_cache_read_is_cheaper_than_base_input(tmp_path):
+    table = load_pricing(_pricing_file(tmp_path))
+    base = table.cost_usd("claude-haiku-4-5", 1_000_000, 0)
+    cached = table.cost_usd("claude-haiku-4-5", 0, 0, cache_read_tokens=1_000_000)
+    assert cached < base
 
 
 def test_unknown_model_cost_is_none_not_zero(tmp_path):
@@ -336,17 +414,27 @@ def test_pricing_records_when_it_was_checked(tmp_path):
     assert table.source.startswith("http")
 
 
+def test_shipped_pricing_file_covers_the_default_models():
+    """The configured models must be priced, or the cost report says "unknown"."""
+    from pathlib import Path
+
+    table = load_pricing(Path(__file__).parents[2] / "eval" / "pricing.yaml")
+    assert table.knows("claude-haiku-4-5")
+    assert table.knows("claude-sonnet-5")
+
+
 def _pricing_file(tmp_path):
     path = tmp_path / "pricing.yaml"
     path.write_text(
         "checked: '2026-09-17'\n"
-        "source: https://developers.openai.com/api/docs/pricing\n"
+        "source: https://platform.claude.com/docs/en/about-claude/pricing\n"
         "mode: standard\n"
         "models:\n"
-        "  gpt-5.6-terra:\n"
-        "    input: 2.00\n"
-        "    cached_input: 0.20\n"
-        "    output: 12.00\n",
+        "  claude-haiku-4-5:\n"
+        "    input: 1.00\n"
+        "    output: 5.00\n"
+        "    cache_read: 0.10\n"
+        "    cache_write: 1.25\n",
         encoding="utf-8",
     )
     return path
@@ -397,12 +485,24 @@ def test_schema_forbids_extra_fields():
         )
 
 
-def test_strict_json_schema_is_generated():
-    """Structured Outputs runs in strict mode; the schema must survive conversion."""
-    from openai.lib._pydantic import to_strict_json_schema
-
-    schema = to_strict_json_schema(PlanExtraction)
+def test_schema_is_json_schema_serialisable():
+    """The schema is what constrains the model, so it must generate cleanly."""
+    schema = PlanExtraction.model_json_schema()
     room_schema = schema["$defs"]["ExtractedRoom"]
+    # extra="forbid" is what produces additionalProperties: false.
     assert room_schema["additionalProperties"] is False
-    # Strict mode requires every property to be required, nullability via anyOf.
+    # Nullable fields are required-but-nullable, so the model must state "no area here"
+    # rather than omitting the key - grounding depends on that distinction.
     assert set(room_schema["required"]) == set(room_schema["properties"])
+    assert {"type": "null"} in room_schema["properties"]["area_m2"]["anyOf"]
+
+
+def test_pydantic_model_accepted_by_the_sdk_as_an_output_format():
+    """Guards the structured-outputs entry point against an SDK shape change."""
+    import inspect
+
+    import anthropic
+
+    params = inspect.signature(anthropic.Anthropic(api_key="sk-ant-x").messages.parse).parameters
+    assert "output_format" in params
+    assert "max_tokens" in params

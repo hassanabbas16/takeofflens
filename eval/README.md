@@ -44,7 +44,7 @@ test plans). Room area = shoelace area of the `Space` polygon / 10000.
 | --- | --- | --- | --- |
 | 1 | `tier1_ocr_sweep.py` | free | — (OCR sweep, resumable + cached) |
 | 2 | `tier2_ground_truth.py` | free | automatic, from `model.svg` |
-| 3 | `tier3_llm.py` | **paid, gated** | — (runs both OpenAI approaches) |
+| 3 | `tier3_cost_probe.py` | **paid, gated** | — (runs all three Claude approaches) |
 | 4 | `tier4_gold.py` + `label_helper.py` | free | hand-verified, 15 plans |
 
 Tier 3 stops after 20 test plans and reports measured cost per page. The full run requires

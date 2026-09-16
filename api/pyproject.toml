@@ -9,7 +9,7 @@ select = ["E", "F", "I", "UP", "B", "ANN", "BLE", "RUF"]
 # The multiplication sign is a real character in plan text ("3.5 × 4.2"); the parser and
 # its tests must handle it literally, so the ambiguous-character rule does not apply.
 "app/pipeline/parse_dims.py" = ["RUF001"]
-# The OpenAI SDK does not export its response types, so Any is the honest annotation here.
+# The Anthropic SDK does not export its response types, so Any is the honest annotation.
 "app/llm.py" = ["ANN401"]
 "tests/test_parse_dims.py" = ["RUF001"]
 "tests/*" = ["ANN"]

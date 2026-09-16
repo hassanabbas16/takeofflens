@@ -21,7 +21,9 @@ pymupdf==1.25.1
 numpy==1.26.4
 
 # ---- Phase 3 (LLM) ----
-openai==3.14.1
+# Anthropic SDK 1.x. messages.parse(output_format=Model) is the structured-outputs entry
+# point and returns a validated instance on response.parsed_output.
+anthropic==1.6.0
 pyyaml==6.0.2
 
 # ---- Dev ----

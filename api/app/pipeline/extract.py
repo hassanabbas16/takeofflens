@@ -37,7 +37,9 @@ from app.schemas import GroundedExtraction, PlanExtraction, Source
 logger = logging.getLogger(__name__)
 
 # Shared domain briefing. Kept in one constant so all three approaches are told the same
-# things about the domain and only differ in the evidence they receive.
+# things about the domain and only differ in the evidence they receive. Sent as the `system`
+# prompt rather than inline in the user turn: it is identical across every page, so it sits
+# at the front of the prefix where prompt caching can reuse it.
 _FINNISH_RULES = """\
 These are Finnish residential floor plans. The conventions matter:
 
@@ -115,11 +117,16 @@ def encode_page_image(image: np.ndarray, max_px: int, jpeg_quality: int) -> tupl
 
 
 def _image_content(encoded: str) -> dict[str, Any]:
-    return {"type": "input_image", "image_url": f"data:image/jpeg;base64,{encoded}"}
+    # Anthropic takes the base64 payload and media type as structured fields, not as a
+    # data: URL.
+    return {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/jpeg", "data": encoded},
+    }
 
 
 def _text_content(text: str) -> dict[str, Any]:
-    return {"type": "input_text", "text": text}
+    return {"type": "text", "text": text}
 
 
 def _run(
@@ -130,7 +137,8 @@ def _run(
         model=model,
         messages=messages,
         schema=PlanExtraction,
-        temperature=settings.openai_temperature,
+        system=_FINNISH_RULES,
+        temperature=settings.anthropic_temperature,
         purpose=purpose,
     )
     return result.parsed, result.usage
@@ -143,13 +151,11 @@ def extract_ocr_llm(
     tokens: list[OcrToken], client: LlmClient, model: str | None = None
 ) -> ExtractionOutcome:
     settings = get_settings()
-    model = model or settings.openai_text_model
+    model = model or settings.anthropic_text_model
     refs = TokenRef.from_tokens(tokens)
     pairs = find_candidate_pairs(refs)
 
-    prompt = f"""{_FINNISH_RULES}
-
-{_CITATION_RULES}
+    prompt = f"""{_CITATION_RULES}
 
 You are given the OCR output of one floor plan page. The page was OCR'd at four rotations
 and merged, so some readings may still be garbled; ignore tokens that are not meaningful.
@@ -187,14 +193,12 @@ def extract_vlm(
     returns, so the report can say how often it agreed with OCR.
     """
     settings = get_settings()
-    model = model or settings.openai_vision_model
+    model = model or settings.anthropic_vision_model
     encoded, width, height = encode_page_image(
         image, settings.vlm_max_image_px, settings.vlm_jpeg_quality
     )
 
-    prompt = f"""{_FINNISH_RULES}
-
-You are looking at one floor plan page, {width}x{height} pixels.
+    prompt = f"""You are looking at one floor plan page, {width}x{height} pixels.
 
 Important: room labels on these plans are frequently ROTATED 90 degrees, so text often runs
 vertically up or down the page rather than left to right. Read it in whatever orientation it
@@ -230,17 +234,15 @@ def extract_hybrid(
     image: np.ndarray, tokens: list[OcrToken], client: LlmClient, model: str | None = None
 ) -> ExtractionOutcome:
     settings = get_settings()
-    model = model or settings.openai_vision_model
+    model = model or settings.anthropic_vision_model
     refs = TokenRef.from_tokens(tokens)
     pairs = find_candidate_pairs(refs)
     encoded, width, height = encode_page_image(
         image, settings.vlm_max_image_px, settings.vlm_jpeg_quality
     )
 
-    prompt = f"""{_FINNISH_RULES}
-
-You are looking at one floor plan page, {width}x{height} pixels, together with the OCR output
-for that same page.
+    prompt = f"""You are looking at one floor plan page, {width}x{height} pixels, together
+with the OCR output for that same page.
 
 Room labels on these plans are frequently ROTATED 90 degrees. The OCR ran at four rotations
 and merged its results, so some readings are garbled or mirrored. The image is authoritative:

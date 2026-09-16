@@ -145,7 +145,10 @@ class LlmCall(Base):
     model: Mapped[str] = mapped_column(String(128), nullable=False)
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    cached_input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Anthropic reports cache reads and writes separately from input_tokens, and prices
+    # them differently, so both are stored rather than folded into the input count.
+    cache_read_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cache_write_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     ok: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

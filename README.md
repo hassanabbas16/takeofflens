@@ -4,15 +4,14 @@ Blueprint analysis: upload an architectural floor plan, extract rooms, dimension
 with OCR + LLM, and review the results with bounding-box overlays.
 
 > **Status: Phase 3.** Ingest, preprocessing, OCR, dimension parsing and all three
-> extraction approaches are built. API routes, viewer and the full eval land in later phases.
-> **No accuracy or cost numbers for the LLM approaches appear here yet — the cost probe has
-> not been run, because it needs an API key.** This README is replaced with the full write-up in Phase 7. No accuracy numbers
+> extraction approaches are built and measured on a 6-plan cost gate. API routes, viewer and
+> the full eval land in later phases. This README is replaced with the full write-up in Phase 7. No accuracy numbers
 > appear here until they have actually been measured.
 
 ## Quick start
 
 ```bash
-cp .env.example .env    # then edit: OPENAI_API_KEY, DATASET_DIR, DATASET_COCO_DIR
+cp .env.example .env    # then edit: ANTHROPIC_API_KEY, DATASET_DIR, DATASET_COCO_DIR
 docker compose up --build
 ```
 
@@ -196,27 +195,64 @@ them — so failing a VLM room for disagreeing with OCR would measure OCR, not t
 
 ### Models and cost
 
-Model IDs come from `OPENAI_TEXT_MODEL` and `OPENAI_VISION_MODEL`, never hardcoded. The
-default is `gpt-5.6-terra`, which supports vision and Structured Outputs and sits at $2/$12
-per 1M tokens ([checked 2026-09-17](https://developers.openai.com/api/docs/models)).
+Model IDs come from `ANTHROPIC_TEXT_MODEL` and `ANTHROPIC_VISION_MODEL`, never hardcoded.
+The default is **`claude-haiku-4-5`** — the cheapest current model at **$1/$5 per MTok**,
+vision-capable, so one model serves all three approaches
+([checked 2026-09-17](https://platform.claude.com/docs/en/about-claude/models/overview)).
+`claude-sonnet-5` ($2/$10) is a one-line step up if Haiku's recall proves insufficient.
 
-Newer models such as `gpt-6-astra` **reject** the `temperature` parameter rather than
-ignoring it. The client detects that from the API error, remembers it per model, and retries
-without the parameter — rather than carrying a hardcoded model list that goes stale.
+Structured outputs go through `client.messages.parse(output_format=<Pydantic model>)`, which
+constrains the response to the schema and returns a validated instance.
+
+Two API details the client handles:
+
+- **`max_tokens` is required**, and hitting it truncates the extraction mid-room. A
+  `max_tokens` stop reason is treated as a failure rather than a usable result — a truncated
+  room list looks exactly like a complete one.
+- **Sonnet 5 and Opus 5 reject `temperature`** (the sampling parameters were removed);
+  Haiku 4.5 still accepts it. `messages.parse()` doesn't expose it either, so when configured
+  it rides in `extra_body`. The client detects a rejection from the API error, remembers it
+  per model, and retries without it — rather than carrying a model list that goes stale.
 
 Cost is never computed in pipeline logic. Every call logs its token counts to `llm_calls`,
 and `eval/pricing.yaml` holds the rates with the date they were taken.
 
+**Anthropic's token accounting differs from OpenAI's in a way that silently misreports cost
+if ignored:** `input_tokens` *excludes* cached tokens, and cache reads and cache writes are
+separate counters with their own rates (a read is 0.1x base input; a 5-minute write is
+1.25x). The four counters are summed independently rather than netted.
+
 ### Running the cost gate
 
 ```bash
-# needs a real OPENAI_API_KEY in .env
+# needs a real ANTHROPIC_API_KEY in .env
 docker compose run --rm api python /eval/tier3_cost_probe.py
 ```
 
 Runs all three approaches over the 6 validation plans, reports labels found, areas found,
 hallucinations, latency and measured cost per page, extrapolates the full 270-plan run, and
-then stops.
+then stops. Responses are cached per (plan, approach), so a re-run costs nothing.
+
+### Measured results — 6 plans, `claude-haiku-4-5`
+
+| Approach | Labels | Areas (printed) | Spurious | Hallucinations | Mean latency | Cost/page |
+| --- | --- | --- | --- | --- | --- | --- |
+| `ocr+llm` | 31/62 | 7/29 | 3 | 2 | 12.4s | $0.0062 |
+| `vlm` | **37/62** | 3/29 | 0 | 2 | **8.6s** | $0.0075 |
+| `hybrid` | 32/62 | **8/29** | 3 | 2 | 18.3s | $0.0088 |
+
+Total spend for the gate: **$0.135** across 18 calls. Full 270-plan split projects to
+$1.67–$2.38 per approach.
+
+The split is informative: the vision model reads **labels** best (it sees rotated text OCR
+mangles) but **areas** worst (the small figures under each label). Adding OCR tokens back in
+(`hybrid`) recovers areas at the cost of label recall and latency. Numbers are from
+[eval/results/tier3_cost_probe.md](eval/results/tier3_cost_probe.md) and are measured, not
+estimated — the per-page cost comes from logged token counts against `eval/pricing.yaml`.
+
+Caveat on the denominators: "Areas (printed)" counts only the 2 of 6 plans that print
+per-room areas. "Spurious" are area matches on the 4 plans that print none — numbers that
+landed within tolerance of an annotation polygon. All 6 hallucinations are on plan 2207.
 
 ## Dataset
 

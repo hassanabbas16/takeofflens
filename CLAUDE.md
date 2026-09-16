@@ -8,10 +8,20 @@ This is a portfolio project for an AI/CV full-stack role. It must actually work 
 ## Stack (do not substitute without asking)
 - Backend: Python 3.11, FastAPI, SQLAlchemy 2.x, Alembic, Pydantic v2
 - CV/OCR: OpenCV, PaddleOCR (EasyOCR as a documented fallback if Paddle install fails), PyMuPDF for PDF -> image
-- LLM/VLM: OpenAI API via the official `openai` Python SDK
-  - Key from env `OPENAI_API_KEY`
-  - Model names from env: `OPENAI_TEXT_MODEL` and `OPENAI_VISION_MODEL` (never hardcode; check the current OpenAI docs for suitable vision-capable models and put sensible defaults in `.env.example`)
-  - Use Structured Outputs (JSON schema response format, generated from the Pydantic models) for all extraction calls
+- LLM/VLM: Anthropic Claude API via the official `anthropic` Python SDK
+  (switched from OpenAI on request, 2026-09-17)
+  - Key from env `ANTHROPIC_API_KEY`
+  - Model names from env: `ANTHROPIC_TEXT_MODEL` and `ANTHROPIC_VISION_MODEL` (never
+    hardcode; check the current Anthropic docs and put sensible defaults in `.env.example`)
+  - Default `claude-haiku-4-5` for both: cheapest current model ($1/$5 per MTok) and
+    vision-capable, so one model serves all three approaches. `claude-sonnet-5` ($2/$10) is
+    the step up if recall is insufficient.
+  - Use Structured Outputs via `client.messages.parse(output_format=<Pydantic model>)`,
+    which returns a validated instance on `response.parsed_output`
+  - `max_tokens` is required by the Messages API. Hitting it truncates the extraction, so a
+    `max_tokens` stop reason is treated as a failure, not as a usable result.
+  - Temperature 0 where the model accepts it. Sonnet 5 and Opus 5 removed the sampling
+    parameters and reject them; that is detected at runtime, not hardcoded.
 - DB: PostgreSQL 16
 - Frontend: Next.js (App Router), TypeScript, Tailwind CSS
 - Infra: Docker + docker-compose (api, web, db)
@@ -86,8 +96,8 @@ takeofflens/
       config.py            # pydantic-settings, env vars
       db.py
       models.py            # SQLAlchemy models
-      schemas.py           # Pydantic schemas (also used as OpenAI response schemas)
-      llm.py               # thin OpenAI client wrapper: retries, timeouts, token/cost logging
+      schemas.py           # Pydantic schemas (also the model's output_format schema)
+      llm.py               # thin Anthropic client wrapper: retries, timeouts, token/cost logging
       routes/
         plans.py
       pipeline/
@@ -96,8 +106,8 @@ takeofflens/
         ocr.py             # OCR wrapper, returns text + bbox + confidence
         parse_dims.py      # regex dimension parser -> meters + area (Finnish formats)
         room_types.py      # Finnish -> English room type mapping
-        classify.py        # OpenAI text model: OCR tokens -> structured rooms JSON
-        vlm_direct.py      # OpenAI vision model baseline (image -> rooms JSON)
+        classify.py        # text model: OCR tokens -> structured rooms JSON
+        vlm_direct.py      # vision model baseline (image -> rooms JSON)
         run.py             # orchestrates the pipeline
     alembic/
     tests/
@@ -178,8 +188,8 @@ takeofflens/
 
    `parse_dims.py` returns a typed result carrying which format matched, so eval can report
    accuracy per format rather than one aggregate number.
-5. **Classify**: send OCR tokens (text + bbox) to the OpenAI text model with a strict JSON schema. Associate each room label with its nearest dimension string using bbox proximity *before* the LLM call, and pass candidate pairs in the prompt. Validate with Pydantic; retry once on failure; never crash the job. Temperature 0.
-6. **VLM baseline**: send the page image (base64, downscaled to a sensible max size to control cost) directly to the OpenAI vision model, same output schema. Store with `source="vlm"`.
+5. **Classify**: send OCR tokens (text + bbox) to the text model with a strict JSON schema. Associate each room label with its nearest dimension string using bbox proximity *before* the LLM call, and pass candidate pairs in the prompt. Validate with Pydantic; retry once on failure; never crash the job. Temperature 0.
+6. **VLM baseline**: send the page image (base64, downscaled to a sensible max size to control cost) directly to the vision model, same output schema. Store with `source="vlm"`.
 6b. **Hybrid**: page image *plus* the OCR token list as hints, to the vision model, citing
    token ids where it uses them and `null` where it read something OCR missed. Store with
    `source="hybrid"`. Three approaches, one schema, so eval compares the evidence rather
@@ -191,7 +201,9 @@ takeofflens/
    **soft** signal only - the vision model can legitimately read an area OCR missed, and on
    these plans OCR misses about half of them, so failing a VLM room for disagreeing with
    OCR would measure OCR rather than the model.
-7. Log every OpenAI call to `llm_calls` (tokens, latency). Cost per page is computed in eval from a pricing config file, not hardcoded in logic.
+7. Log every model call to `llm_calls` (tokens, latency). Anthropic reports cache reads and
+   cache writes as counters **separate from** `input_tokens`, so all four are stored and
+   summed independently when costing - netting them would undercount. Cost per page is computed in eval from a pricing config file, not hardcoded in logic.
 8. Processing runs as a FastAPI BackgroundTask for now. Keep the interface clean enough to move to a queue later; note that in the README.
 
 ## Finnish room labels
@@ -300,7 +312,7 @@ All tiers read plans from the mounted `DATASET_DIR`. None of them copy image dat
   never described as hand-verified. Areas here are derived from the annotation polygon, not
   read off the drawing.
 
-### Tier 3 — OpenAI approaches on the test split, cost-gated
+### Tier 3 — Claude approaches on the test split, cost-gated
 `eval/tier3_llm.py`
 
 Runs both `ocr+llm` and `vlm` over the **`high_quality_architectural` test plans only**

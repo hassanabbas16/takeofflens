@@ -3,6 +3,12 @@
 Never guesses. A model missing from the table yields ``None``, which the reports render as
 "unknown" rather than as zero - a silent zero would understate cost, which is the one
 direction that matters here.
+
+Anthropic's token accounting is not the same shape as OpenAI's, and getting it wrong
+silently misreports cost: ``input_tokens`` **excludes** cached tokens rather than including
+them. Cache reads and cache writes are separate counters with their own rates (a read is
+0.1x base input; a 5-minute write is 1.25x). So the total is a sum of four independent
+counters, not a subtraction.
 """
 
 from __future__ import annotations
@@ -21,8 +27,9 @@ PER_MILLION = 1_000_000
 @dataclass(frozen=True)
 class ModelPrice:
     input: float
-    cached_input: float | None
     output: float
+    cache_read: float | None = None
+    cache_write: float | None = None
 
 
 @dataclass(frozen=True)
@@ -33,20 +40,24 @@ class PricingTable:
     models: dict[str, ModelPrice]
 
     def cost_usd(
-        self, model: str, input_tokens: int, output_tokens: int, cached_input_tokens: int = 0
+        self,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
     ) -> float | None:
+        """Cost in USD. The four counters are independent and are summed, not netted."""
         price = self.models.get(model)
         if price is None:
             return None
-        # Cached input is billed at the cheaper rate, so it is subtracted from the full-rate
-        # input count rather than charged twice.
-        cached = min(cached_input_tokens, input_tokens)
-        full_rate = input_tokens - cached
-        cached_rate = price.cached_input if price.cached_input is not None else price.input
+        read_rate = price.cache_read if price.cache_read is not None else price.input
+        write_rate = price.cache_write if price.cache_write is not None else price.input
         total = (
-            full_rate * price.input
-            + cached * cached_rate
+            input_tokens * price.input
             + output_tokens * price.output
+            + cache_read_tokens * read_rate
+            + cache_write_tokens * write_rate
         ) / PER_MILLION
         return round(total, 6)
 
@@ -60,10 +71,13 @@ def load_pricing(path: Path | None = None) -> PricingTable:
     models = {
         name: ModelPrice(
             input=float(entry["input"]),
-            cached_input=(
-                float(entry["cached_input"]) if entry.get("cached_input") is not None else None
-            ),
             output=float(entry["output"]),
+            cache_read=(
+                float(entry["cache_read"]) if entry.get("cache_read") is not None else None
+            ),
+            cache_write=(
+                float(entry["cache_write"]) if entry.get("cache_write") is not None else None
+            ),
         )
         for name, entry in (data.get("models") or {}).items()
     }

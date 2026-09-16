@@ -11,15 +11,19 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://takeofflens:change_me_locally@db:5432/takeofflens"
 
-    # OpenAI. Model names are env-driven so they are never hardcoded in pipeline logic.
-    openai_api_key: str = ""
-    openai_text_model: str = ""
-    openai_vision_model: str = ""
-    openai_timeout_seconds: float = 120.0
-    openai_max_retries: int = 1  # one retry on schema failure, per the spec
-    # Temperature 0 for determinism. Models that reject the parameter are detected at
-    # runtime and the parameter is dropped for them - see llm.py.
-    openai_temperature: float = 0.0
+    # Anthropic. Model names are env-driven so they are never hardcoded in pipeline logic.
+    anthropic_api_key: str = ""
+    anthropic_text_model: str = ""
+    anthropic_vision_model: str = ""
+    anthropic_timeout_seconds: float = 120.0
+    anthropic_max_retries: int = 1  # one retry on schema failure, per the spec
+    # max_tokens is required by the Messages API. A plan has at most a few dozen rooms;
+    # 8000 leaves generous headroom, and hitting the cap is treated as a failure because a
+    # truncated room list looks like a complete one.
+    anthropic_max_tokens: int = 8000
+    # Temperature 0 for determinism. Sonnet 5 and Opus 5 removed sampling parameters and
+    # reject this; that is detected at runtime and the parameter dropped - see llm.py.
+    anthropic_temperature: float | None = 0.0
     # Longest image edge sent to the vision models, to control cost.
     vlm_max_image_px: int = 1536
     vlm_jpeg_quality: int = 85

@@ -1,12 +1,12 @@
 """Pydantic schemas.
 
 These are the single source of truth for the extraction contract: the same models generate
-the OpenAI Structured Outputs JSON schema, validate the response, and shape the API payload.
+the structured-output schema sent to Claude, validate the response, and shape the API payload.
 
-Structured Outputs runs in strict mode, which requires every property to be required and
-``additionalProperties: false``. Optional values are therefore expressed as nullable types
-(``float | None``) rather than omitted fields - the model must explicitly say "no area
-here" instead of leaving the key out, which is also what we want for grounding.
+The model is constrained to this schema via ``client.messages.parse(output_format=...)``.
+Optional values are expressed as nullable types (``float | None``) rather than omitted
+fields, so the model must explicitly say "no area here" instead of leaving the key out -
+which is also what grounding needs in order to tell a missing area from an unstated one.
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ class ExtractedRoom(BaseModel):
 
 
 class PlanExtraction(BaseModel):
-    """Top-level extraction result. This is the OpenAI response schema."""
+    """Top-level extraction result. This is the schema the model is constrained to."""
 
     model_config = ConfigDict(extra="forbid")
 
