@@ -77,10 +77,48 @@ Room labels on these plans are frequently set at 90 degrees. A single upright OC
 recovers almost nothing, and on vertical text PaddleOCR often picks the wrong 180-degree flip
 and returns confidently mirrored readings (`9X21` as `IZX6`, `KHH` as `HHM`).
 
-The pipeline OCRs each page at 0/90/180/270, maps every box back to original page coordinates
-and merges, keeping the highest-confidence reading among overlapping boxes. On the smoke-test
-plan the orientation passes contributed 5 / 29 / 30 / 15 tokens respectively — the upright
-pass alone would have found 5.
+The pipeline OCRs each page at 0/90/180/270, maps every box back to original page coordinates,
+clusters overlapping boxes and picks the best-supported reading from each cluster.
+
+Choosing that reading by recogniser confidence does not work: on rotated text the recogniser is
+confidently wrong (`LEXS` scored 0.943 against the correct `9X21` at 0.895). Readings are
+instead ranked by, in order:
+
+1. **Vocabulary** — does the reading match the Finnish room lexicon, or a valid area,
+   dimension or door-code pattern? `9X21` scores; `IZX6` does not.
+2. **Orientation plausibility** — a tall page-space box means vertical text, which the 90/270
+   passes present upright to the recogniser. Used only to break ties.
+3. **Confidence**, last.
+
+Vocabulary must outrank orientation: `MH` is read correctly from the 180 pass on a tall box, so
+a hard orientation filter would discard it. Measured across 6 architectural test plans, this
+ranking raised room-label recall from **27/62 to 32/62**, with no plan regressing.
+
+The orientation rule applies to tall boxes only. The mirror rule for wide boxes was tested and
+rejected — it is wrong on real data, where `9X21` at `(1931,588)` is read correctly by the 90
+pass while 0 and 180 give `1 ZX8` and `907`. It stays available as a config option purely so
+the claim can be re-tested.
+
+### Settings confirmed on a wider set
+
+Re-measured across 6 `high_quality_architectural` test plans, varying one setting at a time,
+against reference labels and areas from `model.svg`:
+
+| Variant | Room labels | Areas | Time |
+| --- | --- | --- | --- |
+| **default — 4 rotations, 1536 det, no threshold** | **32/62** | **16/89** | 88s |
+| 0° only | 16/62 | 4/89 | 23s |
+| 0° + 90° | 25/62 | 10/89 | 45s |
+| detection size 2400 | 26/62 | 7/89 | 152s |
+| adaptive threshold on | 19/62 | 16/89 | 98s |
+
+All three original choices held: four rotation passes beat one or two, the larger detection
+size is worse *and* 73% slower, and adaptive threshold costs 13 room labels.
+
+The area denominator is deliberately generous — it counts every room in the SVG annotation,
+but many plans print no per-room areas at all (2536 prints only the apartment summary
+`4H K KH WC 90 M2`). So 16/89 understates area recall on pages that actually carry areas;
+Tier 1 will establish the real denominator.
 
 ![OCR debug overlay](docs/ocr_debug_1191.png)
 
@@ -89,6 +127,29 @@ Boxes are coloured by confidence: green >= 0.9, amber 0.7-0.9, red below. Regene
 ```bash
 docker compose run --rm --no-deps api python -m app.pipeline.run   /data/cubicasa5k/high_quality_architectural/1191/F1_scaled.png   --debug-image /app/_debug/ocr_1191.png
 ```
+
+## Dimension parsing
+
+`parse_dims.parse()` returns a typed result — `area`, `dimension_pair`, `door_window_code` or
+`unknown` — each carrying a reason, the matched format, and a plausibility flag.
+
+| Input | Kind | Result |
+| --- | --- | --- |
+| `11,7 m²`, `11.7`, `90 M2` | `area` | `area_m2=11.7` |
+| `MH 11.7` | `area` | `area_m2=11.7`, `label=MH`, `room_type=bedroom` |
+| `3,5 x 4,2`, `3500 x 4200` | `dimension_pair` | `width_m=3.5`, `length_m=4.2` |
+| `9X21`, `10x21`, `12X12` | `door_window_code` | excluded from room dimensions |
+| `1:100`, `+46.290`, `2024`, `19940` | `unknown` | scale / elevation / year / mm wall run |
+| `4H K KH WC 90 M2` | `unknown` | apartment summary, not a room |
+
+Areas never invent a width and length, and pairs are never inferred from an area. Areas below
+1 m² or above 500 m² are flagged rather than dropped.
+
+The discriminator between `3500 x 4200` (millimetres) and `9X21` (a door code) is magnitude and
+the decimal separator: a bare integer pair with both sides ≤ 30 is a Finnish decimetre door
+code. `3 x 4` is genuinely ambiguous and is classified as a door code, since that is far more
+common on these plans — `raw` is preserved so a later stage can override. 91 unit tests cover
+this, including proof that door codes are never read as room dimensions.
 
 ## Dataset
 

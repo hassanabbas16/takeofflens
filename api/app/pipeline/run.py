@@ -117,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
             det_limit_type=settings.ocr_det_limit_type,
             min_confidence=args.min_confidence,
             dedup_iou=settings.ocr_dedup_iou,
+            dedup_aspect_rule=settings.ocr_dedup_aspect_rule,
         )
         ocr_ms = (time.perf_counter() - t0) * 1000
 

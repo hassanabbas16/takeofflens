@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     ocr_min_confidence: float = 0.5
     # IoU above which two boxes from different orientation passes are the same token.
     ocr_dedup_iou: float = 0.5
+    # How box aspect ratio constrains which orientation pass a reading may come from.
+    # "tall_only" (default), "both" or "off" - see ocr.orientation_is_plausible.
+    ocr_dedup_aspect_rule: str = "tall_only"
 
     max_upload_mb: int = 20
     cors_origins: str = "http://localhost:3000"

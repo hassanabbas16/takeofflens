@@ -361,7 +361,9 @@ run, its numbers are absent — never placeholders, never estimates.
 ## Build phases — stop after each, summarize, and wait for my go-ahead
 - **Phase 0**: Scaffold repo, docker-compose with db/api/web, health endpoint, `.env.example`, Alembic init. Verify `docker compose up` works.
 - **Phase 1**: Ingest + preprocess + OCR, runnable from a CLI (`python -m app.pipeline.run path/to/plan.pdf`) printing tokens. Save a debug image with boxes drawn.
-- **Phase 2**: Dimension parser with full unit tests.
+- **Phase 2**: Dimension parser with full unit tests. Typed results
+  (`area` / `dimension_pair` / `door_window_code` / `unknown`) each carrying a reason, the
+  matched format for per-format eval reporting, and a plausibility flag.
 - **Phase 3**: OpenAI classification + VLM baseline, Structured Outputs, Pydantic validation, call logging, DB persistence.
 - **Phase 4**: API routes + background processing + export.
 - **Phase 5**: Next.js upload + viewer.

@@ -6,6 +6,10 @@ target-version = "py311"
 select = ["E", "F", "I", "UP", "B", "ANN", "BLE", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
+# The multiplication sign is a real character in plan text ("3.5 × 4.2"); the parser and
+# its tests must handle it literally, so the ambiguous-character rule does not apply.
+"app/pipeline/parse_dims.py" = ["RUF001"]
+"tests/test_parse_dims.py" = ["RUF001"]
 "tests/*" = ["ANN"]
 "alembic/*" = ["ANN", "E501"]
 

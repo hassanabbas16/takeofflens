@@ -39,6 +39,9 @@ from typing import Any
 import cv2
 import numpy as np
 
+from app.pipeline.parse_dims import pattern_score
+from app.pipeline.room_types import label_match_score
+
 logger = logging.getLogger(__name__)
 
 BBox = tuple[int, int, int, int]  # x1, y1, x2, y2
@@ -120,19 +123,103 @@ def iou(a: BBox, b: BBox) -> float:
     return inter / union if union > 0 else 0.0
 
 
-def deduplicate(tokens: list[OcrToken], iou_threshold: float) -> list[OcrToken]:
-    """Keep the highest-confidence reading among overlapping boxes.
+# Boxes more elongated than this are treated as having a definite text direction.
+_ASPECT_RATIO = 1.2
 
-    Greedy and confidence-descending: the standard NMS shape, but selecting a *reading*
-    rather than suppressing a duplicate detection.
+
+def box_shape(bbox: BBox, ratio: float = _ASPECT_RATIO) -> str:
+    """Classify a page-space box as TALL, WIDE or SQUARE."""
+    width = bbox[2] - bbox[0]
+    height = bbox[3] - bbox[1]
+    if height > width * ratio:
+        return "tall"
+    if width > height * ratio:
+        return "wide"
+    return "square"
+
+
+def orientation_is_plausible(bbox: BBox, angle: int, rule: str = "tall_only") -> bool:
+    """Whether ``angle`` could plausibly have produced a correct reading for this box.
+
+    A tall page-space box means the text runs vertically on the page, and the pass that
+    presents it horizontally to the recogniser is 90 or 270. Readings from 0/180 on a tall
+    box come from the detector finding a vertical line and the textline classifier guessing
+    its flip - the path that produces mirrored output.
+
+    Measured on plan 1191's contested clusters, the tall case holds well, but the mirror
+    rule for wide boxes does NOT: "9X21" at (1931,588) is read correctly by the 90 pass
+    while 0 and 180 give "1 ZX8" and "907". So ``tall_only`` is the default and ``both`` is
+    kept only so eval can re-test the claim.
+
+    This is a soft signal. It ranks below vocabulary evidence, because a correct reading
+    from a "wrong" angle is common - "MH" is read correctly at 180 on a tall box.
     """
-    kept: list[OcrToken] = []
-    for token in sorted(tokens, key=lambda t: t.confidence, reverse=True):
-        if any(iou(token.bbox, k.bbox) >= iou_threshold for k in kept):
-            continue
-        kept.append(token)
+    shape = box_shape(bbox)
+    if rule == "off" or shape == "square":
+        return True
+    if shape == "tall":
+        return angle in (90, 270)
+    if rule == "both":
+        return angle in (0, 180)
+    return True
+
+
+def vocabulary_score(text: str) -> float:
+    """How much this reading looks like real plan text, in [0, 1].
+
+    Combines the Finnish room lexicon with the dimension/area/door-code patterns, so that
+    "9X21" beats "IZX6" and "TYOHUONE" beats "TrOHUONE" on evidence rather than on the
+    recogniser's own confidence, which is unreliable on rotated text.
+    """
+    return max(label_match_score(text), pattern_score(text))
+
+
+def reading_key(token: OcrToken, rule: str = "tall_only") -> tuple[float, bool, float]:
+    """Sort key for choosing between competing readings of the same box.
+
+    Lexicographic and deliberately ordered:
+
+    1. **Vocabulary**, rounded to one decimal so near-ties fall through to the next signal.
+       This is the strongest evidence and must outrank orientation: "MH" is read correctly
+       from the 180 pass on a tall box, and a hard orientation filter would discard it.
+    2. **Orientation plausibility**, which breaks ties between readings that look equally
+       word-like.
+    3. **Recogniser confidence**, last, because on rotated text it is confidently wrong -
+       "LEXS" scored 0.943 against the correct "9X21" at 0.895.
+    """
+    return (
+        round(vocabulary_score(token.text), 1),
+        orientation_is_plausible(token.bbox, token.angle, rule),
+        token.confidence,
+    )
+
+
+def deduplicate(
+    tokens: list[OcrToken], iou_threshold: float, rule: str = "tall_only"
+) -> list[OcrToken]:
+    """Cluster overlapping boxes and keep the best-supported reading from each.
+
+    Clusters first rather than running greedy NMS, so the winner is chosen against every
+    competing reading of that box rather than against whichever happened to be seen first.
+    """
+    clusters: list[list[OcrToken]] = []
+    # Seed clusters from the largest boxes so a cluster forms around the full detection
+    # rather than around a fragment of it.
+    for token in sorted(tokens, key=lambda t: -_area(t.bbox)):
+        for cluster in clusters:
+            if any(iou(token.bbox, other.bbox) >= iou_threshold for other in cluster):
+                cluster.append(token)
+                break
+        else:
+            clusters.append([token])
+
+    kept = [max(cluster, key=lambda t: reading_key(t, rule)) for cluster in clusters]
     # Reading order: top-to-bottom, then left-to-right.
     return sorted(kept, key=lambda t: (t.bbox[1], t.bbox[0]))
+
+
+def _area(bbox: BBox) -> int:
+    return max(0, bbox[2] - bbox[0]) * max(0, bbox[3] - bbox[1])
 
 
 @lru_cache(maxsize=4)
@@ -164,6 +251,7 @@ def run_ocr(
     det_limit_type: str = "max",
     min_confidence: float = 0.5,
     dedup_iou: float = 0.5,
+    dedup_aspect_rule: str = "tall_only",
 ) -> list[OcrToken]:
     """OCR ``image`` at each orientation and merge into original page coordinates."""
     if image.ndim != 3:
@@ -200,7 +288,7 @@ def run_ocr(
                     )
                 )
 
-    return deduplicate(tokens, dedup_iou)
+    return deduplicate(tokens, dedup_iou, dedup_aspect_rule)
 
 
 def draw_tokens(image: np.ndarray, tokens: list[OcrToken]) -> np.ndarray:
