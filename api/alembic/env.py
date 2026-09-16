@@ -5,6 +5,10 @@ from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 
 from alembic import context
+
+# Imported for its side effect: registering every model on Base.metadata so autogenerate
+# can see them. Without this, autogenerate silently produces an empty migration.
+from app import models  # noqa: F401
 from app.config import get_settings
 from app.db import Base
 
@@ -14,7 +18,6 @@ config.set_main_option("sqlalchemy.url", get_settings().database_url)
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Models are imported in Phase 1+ so autogenerate sees them.
 target_metadata = Base.metadata
 
 

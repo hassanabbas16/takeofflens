@@ -1,0 +1,48 @@
+{
+  "_provenance": {
+    "what": "Count of per-room areas actually PRINTED on each drawing, read by eye from F1_scaled.png.",
+    "why": "model.svg lists every annotated room, but its dimension labels are display:none and never rendered. Using the SVG room count as an area denominator therefore counts rooms whose area was never printed, understating recall. This file is the honest denominator.",
+    "method": "hand-verified, visual inspection of the rendered page",
+    "date": "2026-09-17",
+    "scope": "the 6 high_quality_architectural test plans used by eval/validate_ocr.py",
+    "caveat": "Hand counts by a single reader. Tier 4 re-verifies areas per room rather than per plan."
+  },
+  "plans": {
+    "1191": {
+      "printed_area_count": 15,
+      "label_style": "uppercase abbreviations with area beneath",
+      "notes": "MH 11.7 x2, MH 14.1, K 14.5, KHH 10.8, ET 6.1, VH 3.6, KH 5.2, TK 3.5, OH 22.6, OLESKELU+RUOKAILU 37.5, PSH 4.0, WC 1.5, TYOHUONE 8.1, B 4.1"
+    },
+    "2536": {
+      "printed_area_count": 0,
+      "label_style": "uppercase abbreviations, no areas",
+      "notes": "carries only the apartment summary '4H K KH WC 90 M2'"
+    },
+    "2530": {
+      "printed_area_count": 0,
+      "label_style": "hand-lettered, no areas",
+      "notes": "entirely hand-written labels; only margin wall runs 1710/250/1110"
+    },
+    "2504": {
+      "printed_area_count": 0,
+      "label_style": "uppercase abbreviations, no areas",
+      "notes": "carries only the apartment summary 'A26 3H+KT+S 61.0 m2'; bedrooms numbered MH1/MH2"
+    },
+    "2207": {
+      "printed_area_count": 14,
+      "label_style": "lowercase spelled-out words with area",
+      "notes": "mh 11.5, mh 12.6 x3, keittio 15.4, khh 6.8, ph 5.4, lo 4.6, vh 2.3, autovaja 19.5, var 11.2, wc 2.5, tk 3.1, olohuone 22.3"
+    },
+    "22": {
+      "printed_area_count": 0,
+      "label_style": "uppercase abbreviations, no areas",
+      "notes": "only elevation marks +124.900 and door/window codes"
+    }
+  },
+  "totals": {
+    "printed_area_count": 29,
+    "svg_room_count": 89,
+    "plans_printing_areas": 2,
+    "plans_without_areas": 4
+  }
+}

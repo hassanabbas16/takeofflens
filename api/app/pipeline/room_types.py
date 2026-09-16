@@ -22,15 +22,21 @@ UNDEFINED = "undefined"
 ROOM_TYPES: dict[str, str] = {
     # Living / sleeping
     "MH": "bedroom",           # makuuhuone, 204
+    "MAKUUHUONE": "bedroom",
+    "MAKUUH": "bedroom",
     "OH": "living_room",       # olohuone, 99
+    "OLOHUONE": "living_room",
+    "OLOH": "living_room",
     "OLESKELU": "living_room",
     "H": "room",               # huone, 35
     "AH": "hobby_room",        # askarteluhuone, 10
+    "ASKARTELU": "hobby_room",
     "ALKOVI": "alcove",
     # Kitchen / dining
     "K": "kitchen",            # keittiö, 73
     "KEITTIO": "kitchen",      # KEITTIÖ, 23
     "KK": "kitchen",           # keittokomero, 9
+    "KT": "kitchen",           # keittotila
     "KEITTOKOMERO": "kitchen",
     "RUOK": "dining",          # ruokailu, 9
     "RUOKAILU": "dining",
@@ -55,6 +61,8 @@ ROOM_TYPES: dict[str, str] = {
     "SH": "sauna",             # saunahuone, 7
     "SAUNA": "sauna",
     "S": "sauna",
+    "LO": "sauna",             # löylyhuone
+    "LOYLYHUONE": "sauna",
     # Utility / storage
     "KHH": "utility",          # kodinhoitohuone, 33
     "VAR": "storage",          # varasto, 42
@@ -63,6 +71,8 @@ ROOM_TYPES: dict[str, str] = {
     "TEKNINEN": "technical_room",
     "ULLAKKO": "attic",
     "APUK": "utility",         # apukeittiö
+    "SK": "closet",            # siivouskomero
+    "PK": "closet",
     # Closets / dressing
     "VH": "walk_in_closet",    # vaatehuone, 63
     "VAATEHUONE": "walk_in_closet",
@@ -70,8 +80,10 @@ ROOM_TYPES: dict[str, str] = {
     "KOMERO": "closet",
     # Work
     "TYOHUONE": "office",      # TYÖHUONE
+    "TYOTILA": "office",
     "TH": "office",            # 7
     "RT": "office",
+    "LH": "room",              # lastenhuone
     # Outdoor
     "ULKOTILA": "outdoor",     # 131
     "PARVEKE": "balcony",      # 31
@@ -79,6 +91,7 @@ ROOM_TYPES: dict[str, str] = {
     "TERASSI": "terrace",      # 25
     "KUISTI": "porch",         # 17
     "AUTOKATOS": "carport",    # 9
+    "AUTOVAJA": "carport",
     "AUTOTALLI": "garage",     # 7
     "KATTH": "covered_terrace",  # KATT.H
     # Annotation placeholder, not a real room type.
@@ -102,9 +115,23 @@ def normalise_label(text: str) -> str:
     return re.sub(r"[^A-Z0-9+]", "", text)
 
 
+_TRAILING_INDEX_RE = re.compile(r"^([A-Z]+)\d{1,2}$")
+
+
 def lookup(text: str) -> str:
-    """Return the English room type for a Finnish label, or ``unknown``."""
-    return ROOM_TYPES.get(normalise_label(text), UNKNOWN)
+    """Return the English room type for a Finnish label, or ``unknown``.
+
+    Falls back to stripping a trailing index, because plans number repeated rooms:
+    ``MH1`` and ``MH2`` are both bedrooms. Only a trailing 1-2 digit suffix is stripped,
+    so this cannot turn a dimension token into a room label.
+    """
+    normalised = normalise_label(text)
+    if normalised in ROOM_TYPES:
+        return ROOM_TYPES[normalised]
+    indexed = _TRAILING_INDEX_RE.match(normalised)
+    if indexed and indexed.group(1) in ROOM_TYPES:
+        return ROOM_TYPES[indexed.group(1)]
+    return UNKNOWN
 
 
 def split_compound(text: str) -> list[str]:
@@ -144,6 +171,9 @@ def label_match_score(text: str) -> float:
     if not normalised:
         return 0.0
     if normalised in ROOM_TYPES:
+        return 1.0
+    indexed = _TRAILING_INDEX_RE.match(normalised)
+    if indexed and indexed.group(1) in ROOM_TYPES:
         return 1.0
     parts = split_compound(normalised)
     if len(parts) > 1 and all(p in ROOM_TYPES for p in parts):

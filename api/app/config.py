@@ -15,6 +15,16 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_text_model: str = ""
     openai_vision_model: str = ""
+    openai_timeout_seconds: float = 120.0
+    openai_max_retries: int = 1  # one retry on schema failure, per the spec
+    # Temperature 0 for determinism. Models that reject the parameter are detected at
+    # runtime and the parameter is dropped for them - see llm.py.
+    openai_temperature: float = 0.0
+    # Longest image edge sent to the vision models, to control cost.
+    vlm_max_image_px: int = 1536
+    vlm_jpeg_quality: int = 85
+    # Pricing table used to turn logged tokens into a cost figure.
+    pricing_path: Path = Path("/eval/pricing.yaml")
 
     # Local storage root, behind the Storage interface so S3 can replace it later.
     storage_dir: Path = Path("/storage")

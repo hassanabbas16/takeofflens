@@ -135,7 +135,7 @@ takeofflens/
 - `plans`: id (uuid), filename, status (pending|processing|done|failed), error, created_at
 - `pages`: id, plan_id, page_number, image_path, width, height
 - `ocr_tokens`: id, page_id, text, confidence, bbox (x1,y1,x2,y2 as ints)
-- `rooms`: id, page_id, name, room_type, width_m, length_m, area_m2, source ("ocr+llm" | "vlm"), raw_text, bbox (nullable)
+- `rooms`: id, page_id, name, room_type, width_m, length_m, area_m2, source ("ocr+llm" | "vlm" | "hybrid" | "detector"), raw_text, bbox (nullable), confidence, source_token_ids, grounded
   - **`area_m2` is the primary extracted field.** Finnish plans print a single area under the
     room label (`MH 11.7`), so area is what is actually on the page.
   - `width_m` and `length_m` are **nullable and never derived**. They are populated only when
@@ -179,7 +179,18 @@ takeofflens/
    `parse_dims.py` returns a typed result carrying which format matched, so eval can report
    accuracy per format rather than one aggregate number.
 5. **Classify**: send OCR tokens (text + bbox) to the OpenAI text model with a strict JSON schema. Associate each room label with its nearest dimension string using bbox proximity *before* the LLM call, and pass candidate pairs in the prompt. Validate with Pydantic; retry once on failure; never crash the job. Temperature 0.
-6. **VLM baseline**: send the page image (base64, downscaled to a sensible max size to control cost) directly to the OpenAI vision model, same output schema. Store with `source="vlm"` so the two approaches can be compared.
+6. **VLM baseline**: send the page image (base64, downscaled to a sensible max size to control cost) directly to the OpenAI vision model, same output schema. Store with `source="vlm"`.
+6b. **Hybrid**: page image *plus* the OCR token list as hints, to the vision model, citing
+   token ids where it uses them and `null` where it read something OCR missed. Store with
+   `source="hybrid"`. Three approaches, one schema, so eval compares the evidence rather
+   than three different pipelines.
+6c. **Grounding check.** For `ocr+llm` and `hybrid` this is hard: every cited token id must
+   exist on the page, and every non-null `area_m2` must match an area the parser actually
+   found in a token. Failures are counted as hallucinations and the room is kept with
+   `grounded=False` so it stays visible and countable. For `vlm` the same checks run as a
+   **soft** signal only - the vision model can legitimately read an area OCR missed, and on
+   these plans OCR misses about half of them, so failing a VLM room for disagreeing with
+   OCR would measure OCR rather than the model.
 7. Log every OpenAI call to `llm_calls` (tokens, latency). Cost per page is computed in eval from a pricing config file, not hardcoded in logic.
 8. Processing runs as a FastAPI BackgroundTask for now. Keep the interface clean enough to move to a queue later; note that in the README.
 
@@ -364,7 +375,9 @@ run, its numbers are absent — never placeholders, never estimates.
 - **Phase 2**: Dimension parser with full unit tests. Typed results
   (`area` / `dimension_pair` / `door_window_code` / `unknown`) each carrying a reason, the
   matched format for per-format eval reporting, and a plausibility flag.
-- **Phase 3**: OpenAI classification + VLM baseline, Structured Outputs, Pydantic validation, call logging, DB persistence.
+- **Phase 3**: Three approaches (`ocr+llm`, `vlm`, `hybrid`) over one Structured Outputs
+  schema, with grounding checks, Pydantic validation, call logging and DB persistence.
+  Gated by a cost probe on the 6 validation plans before any larger run.
 - **Phase 4**: API routes + background processing + export.
 - **Phase 5**: Next.js upload + viewer.
 - **Phase 6**: Eval harness, built and run tier by tier.

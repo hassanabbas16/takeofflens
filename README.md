@@ -3,8 +3,10 @@
 Blueprint analysis: upload an architectural floor plan, extract rooms, dimensions and areas
 with OCR + LLM, and review the results with bounding-box overlays.
 
-> **Status: Phase 1.** Ingest, preprocessing and OCR run from the CLI. Dimension parsing,
-> LLM extraction, API routes, viewer and eval land in later phases. This README is replaced with the full write-up in Phase 7. No accuracy numbers
+> **Status: Phase 3.** Ingest, preprocessing, OCR, dimension parsing and all three
+> extraction approaches are built. API routes, viewer and the full eval land in later phases.
+> **No accuracy or cost numbers for the LLM approaches appear here yet — the cost probe has
+> not been run, because it needs an API key.** This README is replaced with the full write-up in Phase 7. No accuracy numbers
 > appear here until they have actually been measured.
 
 ## Quick start
@@ -104,21 +106,34 @@ the claim can be re-tested.
 Re-measured across 6 `high_quality_architectural` test plans, varying one setting at a time,
 against reference labels and areas from `model.svg`:
 
-| Variant | Room labels | Areas | Time |
+| Variant | Room labels | Areas (printed) | Time |
 | --- | --- | --- | --- |
-| **default — 4 rotations, 1536 det, no threshold** | **32/62** | **16/89** | 88s |
-| 0° only | 16/62 | 4/89 | 23s |
-| 0° + 90° | 25/62 | 10/89 | 45s |
-| detection size 2400 | 26/62 | 7/89 | 152s |
-| adaptive threshold on | 19/62 | 16/89 | 98s |
+| **default — 4 rotations, 1536 det, no threshold** | **32/62** | **14/29** | 114s |
+| 0° only | 16/62 | 4/29 | 27s |
+| 0° + 90° | 25/62 | 10/29 | 53s |
+| detection size 2400 | 26/62 | 5/29 | 172s |
+| adaptive threshold on | 20/62 | 11/29 | 108s |
 
 All three original choices held: four rotation passes beat one or two, the larger detection
-size is worse *and* 73% slower, and adaptive threshold costs 13 room labels.
+size is worse *and* 50% slower, and adaptive threshold costs 12 room labels.
 
-The area denominator is deliberately generous — it counts every room in the SVG annotation,
-but many plans print no per-room areas at all (2536 prints only the apartment summary
-`4H K KH WC 90 M2`). So 16/89 understates area recall on pages that actually carry areas;
-Tier 1 will establish the real denominator.
+### Two area denominators, and why only one is honest
+
+`model.svg` lists every annotated room, but its dimension labels are `display: none` and are
+never rendered onto the page. Counting them as the denominator therefore counts areas that
+were **never printed**, which understates recall badly:
+
+| Denominator | Result | |
+| --- | --- | --- |
+| rooms in the SVG annotation | 16/89 (18%) | misleading |
+| **areas actually printed on the page** | **14/29 (48%)** | hand-counted, [the real number](eval/ground_truth/printed_areas_6.json) |
+
+Only 2 of the 6 plans print per-room areas at all. The other four carry a whole-apartment
+summary (`4H K KH WC 90 M2`), hand-lettered labels, or nothing but elevations and door codes.
+
+The same correction exposes 2 **spurious** area matches — numbers on plans that print no
+areas which happened to land within 5% of a polygon area. Under the SVG denominator those
+counted as successes.
 
 ![OCR debug overlay](docs/ocr_debug_1191.png)
 
@@ -150,6 +165,58 @@ the decimal separator: a bare integer pair with both sides ≤ 30 is a Finnish d
 code. `3 x 4` is genuinely ambiguous and is classified as a door code, since that is far more
 common on these plans — `raw` is preserved so a later stage can override. 91 unit tests cover
 this, including proof that door codes are never read as room dimensions.
+
+## Extraction: three approaches, one schema
+
+| Approach | Evidence given to the model | Citations |
+| --- | --- | --- |
+| `ocr+llm` | OCR tokens with ids and boxes, plus candidate label/area pairs | required |
+| `vlm` | the page image alone, downscaled | none |
+| `hybrid` | the page image **and** the OCR token list as hints | where used |
+
+All three return the same Pydantic schema via Structured Outputs in strict mode, so the eval
+comparison is about the evidence rather than three different pipelines.
+
+Label/area pairing happens **before** the call, not inside it. On these plans the area sits
+directly under its label, which is a geometric fact the model should not have to rediscover
+from a flat token list — and if it did, there would be no way to check it. Candidate pairs
+are computed by weighted bbox proximity (vertical distance counts for less than horizontal)
+and passed as suggestions.
+
+### Grounding
+
+Hard for `ocr+llm` and `hybrid`: every cited token id must exist, and every non-null
+`area_m2` must match an area the parser actually found in a token. Failures are counted as
+hallucinations; the room is kept with `grounded=False` so it stays visible and countable
+rather than quietly disappearing.
+
+Soft for `vlm`: the same checks run and are reported, but nothing is dropped. The vision
+model can legitimately read an area OCR missed — and on these plans OCR misses about half of
+them — so failing a VLM room for disagreeing with OCR would measure OCR, not the model.
+
+### Models and cost
+
+Model IDs come from `OPENAI_TEXT_MODEL` and `OPENAI_VISION_MODEL`, never hardcoded. The
+default is `gpt-5.6-terra`, which supports vision and Structured Outputs and sits at $2/$12
+per 1M tokens ([checked 2026-09-17](https://developers.openai.com/api/docs/models)).
+
+Newer models such as `gpt-6-astra` **reject** the `temperature` parameter rather than
+ignoring it. The client detects that from the API error, remembers it per model, and retries
+without the parameter — rather than carrying a hardcoded model list that goes stale.
+
+Cost is never computed in pipeline logic. Every call logs its token counts to `llm_calls`,
+and `eval/pricing.yaml` holds the rates with the date they were taken.
+
+### Running the cost gate
+
+```bash
+# needs a real OPENAI_API_KEY in .env
+docker compose run --rm api python /eval/tier3_cost_probe.py
+```
+
+Runs all three approaches over the 6 validation plans, reports labels found, areas found,
+hallucinations, latency and measured cost per page, extrapolates the full 270-plan run, and
+then stops.
 
 ## Dataset
 

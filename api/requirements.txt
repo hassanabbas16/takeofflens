@@ -21,7 +21,8 @@ pymupdf==1.25.1
 numpy==1.26.4
 
 # ---- Phase 3 (LLM) ----
-# openai
+openai==3.14.1
+pyyaml==6.0.2
 
 # ---- Dev ----
 pytest==8.3.4

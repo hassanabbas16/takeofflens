@@ -1,0 +1,38 @@
+# OpenAI API pricing, USD per 1,000,000 tokens.
+#
+# Cost is computed from this file, never hardcoded in pipeline logic, so a price change
+# never requires a code change and a logged token count stays true whatever prices do later.
+#
+# Source: https://developers.openai.com/api/docs/pricing
+# Checked: 2026-09-17
+# Mode: Standard. Batch and Flex are roughly 50% of these; Fast mode is roughly 2x.
+#       Long-context rates are higher and are NOT modelled here - if a plan ever exceeds the
+#       standard context tier, the cost report will understate it and must say so.
+
+checked: "2026-09-17"
+source: "https://developers.openai.com/api/docs/pricing"
+mode: standard
+currency: USD
+unit: per_1m_tokens
+
+models:
+  gpt-6-astra:
+    input: 10.00
+    cached_input: 1.00
+    output: 50.00
+  gpt-5.6-sol:
+    input: 4.00
+    cached_input: 0.40
+    output: 20.00
+    note: "promotional pricing stated as available at least through 2026-11-21"
+  gpt-5.6-terra:
+    input: 2.00
+    cached_input: 0.20
+    output: 12.00
+  gpt-5.6-luna:
+    input: 0.20
+    cached_input: 0.02
+    output: 1.20
+
+# Used when a model id is not in the table. Cost is reported as null rather than guessed.
+unknown_model_cost: null
