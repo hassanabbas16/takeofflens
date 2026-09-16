@@ -312,11 +312,22 @@ All tiers read plans from the mounted `DATASET_DIR`. None of them copy image dat
   never described as hand-verified. Areas here are derived from the annotation polygon, not
   read off the drawing.
 
-### Tier 3 — Claude approaches on the test split, cost-gated
+### Tier 3 — Claude approaches on a 50-plan sample, cost-gated
 `eval/tier3_llm.py`
 
-Runs both `ocr+llm` and `vlm` over the **`high_quality_architectural` test plans only**
-(~270 of the 399 test plans), reusing the Tier 1 OCR cache so no OCR is recomputed.
+Runs `rules`, `ocr+llm`, `vlm` and `hybrid` over a **50-plan random sample** of the
+`high_quality_architectural` test plans, drawn with a documented fixed seed
+(`SAMPLE_SEED` in `eval/tier3_cost_probe.py`) so the sample is reproducible. Reuses the
+Tier 1 OCR cache so no OCR is recomputed.
+
+**`rules` (OCR + parser + bbox pairing, no model call) is included in every results table.**
+It costs nothing and is deterministic, so it is the floor each paid approach must beat.
+
+The full run uses the **Message Batches API** (50% of standard rates). A hard `--max-spend`
+cap stops the run before any call that could take the running total past it, checked from
+logged costs *before* the call is made.
+
+**API keys are read from the project `.env` file only, never from the process environment.**
 
 `colorful` and `high_quality` are **excluded from all LLM runs and accuracy metrics**: the
 former has no text on the page at all, the latter has room labels but essentially no areas or

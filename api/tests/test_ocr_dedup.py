@@ -235,3 +235,145 @@ def test_every_cluster_yields_exactly_one_token():
     ]
     kept = deduplicate(tokens, iou_threshold=0.5)
     assert sorted(t.text for t in kept) == ["11.7", "MH"]
+
+
+# --- combined label+area tokens and OCR near-misses -----------------------------------
+# Every case below came from a real plan and cost a real area before it was fixed.
+
+
+def test_combined_label_area_token_pairs_with_itself():
+    """"khh 6.8" is one token. It must not be paired with another room's area."""
+    from app.pipeline.pairing import TokenRef, find_candidate_pairs
+
+    refs = [
+        TokenRef(id=0, text="khh 6.8", confidence=0.9, bbox=(1710, 430, 1848, 474)),
+        TokenRef(id=1, text="mh 11.5", confidence=0.9, bbox=(556, 435, 684, 480)),
+    ]
+    pairs = find_candidate_pairs(refs)
+    assert len(pairs) == 2
+    by_label = {p.label_text: p for p in pairs}
+    assert by_label["khh"].area_m2 == 6.8
+    assert by_label["khh"].combined is True
+    assert by_label["mh"].area_m2 == 11.5
+
+
+def test_combined_token_is_not_offered_as_another_labels_area():
+    from app.pipeline.pairing import TokenRef, find_candidate_pairs
+
+    refs = [
+        TokenRef(id=0, text="khh 6.8", confidence=0.9, bbox=(100, 100, 200, 140)),
+        TokenRef(id=1, text="OH", confidence=0.9, bbox=(210, 100, 240, 140)),
+    ]
+    pairs = find_candidate_pairs(refs)
+    # OH has no area of its own, and must not steal 6.8 from khh.
+    oh = [p for p in pairs if p.label_text == "OH" or p.label.text == "OH"]
+    assert not oh or oh[0].area_m2 != 6.8
+
+
+def test_rules_reports_the_label_alone_not_the_glued_token():
+    """label_raw of "khh 6.8" would not match the reference label "KHH"."""
+    from app.pipeline.extract import extract_rules
+    from app.pipeline.ocr import OcrToken
+
+    outcome = extract_rules([
+        OcrToken(text="khh 6.8", confidence=0.9, bbox=(100, 100, 200, 140), angle=0),
+    ])
+    assert [r.label_raw for r in outcome.rooms] == ["khh"]
+    assert outcome.rooms[0].area_m2 == 6.8
+    assert outcome.rooms[0].room_type.value == "utility"
+
+
+def test_multi_word_label_with_area():
+    """OCR splits words: "autovaja 19.5" came back as "autova ja 19.5"."""
+    from app.pipeline.parse_dims import DimKind, parse
+
+    result = parse("autova ja 19.5")
+    assert result.kind is DimKind.AREA
+    assert result.area_m2 == 19.5
+
+
+def test_single_character_ocr_slip_in_a_long_label_is_forgiven():
+    """KEITTIO came back as KEITTLO - I misread as L."""
+    from app.pipeline.parse_dims import DimKind, parse
+    from app.pipeline.room_types import primary_type
+
+    result = parse("keittlo 15.4")
+    assert result.kind is DimKind.AREA
+    assert result.area_m2 == 15.4
+    assert primary_type("keittlo") == "kitchen"
+
+
+def test_short_labels_are_never_fuzzy_matched():
+    """K, H, S and WC are all real and one edit apart - guessing would corrupt them."""
+    from app.pipeline.room_types import resolve_label
+
+    assert resolve_label("K") == "K"
+    assert resolve_label("H") == "H"
+    # A two-character non-label must not snap to a real one.
+    assert resolve_label("ZQ") is None
+    assert resolve_label("XY") is None
+
+
+def test_fuzzy_matching_does_not_invent_labels_from_noise():
+    from app.pipeline.room_types import resolve_label
+
+    assert resolve_label("QQQQQQ") is None
+    assert resolve_label("123456") is None
+
+
+def test_rules_approach_is_grounded_by_construction():
+    from app.pipeline.extract import extract_rules
+    from app.pipeline.ocr import OcrToken
+
+    outcome = extract_rules([
+        OcrToken(text="MH", confidence=0.95, bbox=(100, 100, 130, 130), angle=0),
+        OcrToken(text="11.7", confidence=0.96, bbox=(100, 135, 140, 160), angle=0),
+        OcrToken(text="9X21", confidence=0.88, bbox=(400, 400, 450, 425), angle=0),
+    ])
+    assert outcome.hallucinations == 0
+    labels = {r.label_raw for r in outcome.rooms}
+    assert "MH" in labels
+    # The door code must never become a room.
+    assert "9X21" not in labels
+
+
+def test_rules_approach_costs_nothing():
+    from app.pipeline.extract import extract_rules
+
+    outcome = extract_rules([])
+    assert outcome.usage.input_tokens == 0
+    assert outcome.usage.output_tokens == 0
+    assert outcome.source.value == "rules"
+
+
+def test_rules_reports_labels_without_an_area_as_rooms_with_null_area():
+    from app.pipeline.extract import extract_rules
+    from app.pipeline.ocr import OcrToken
+
+    outcome = extract_rules([
+        OcrToken(text="OH", confidence=0.9, bbox=(100, 100, 130, 130), angle=0),
+    ])
+    assert len(outcome.rooms) == 1
+    assert outcome.rooms[0].area_m2 is None
+
+
+def test_soft_grounding_issues_are_not_counted_as_hallucinations():
+    """The vlm path reads areas OCR missed; that is not fabrication."""
+    from app.pipeline.grounding import check_grounding
+    from app.pipeline.pairing import TokenRef
+    from app.schemas import ExtractedRoom, PlanExtraction, RoomType
+
+    refs = [TokenRef(id=0, text="MH", confidence=0.9, bbox=(0, 0, 20, 20))]
+    extraction = PlanExtraction(
+        rooms=[ExtractedRoom(
+            label_raw="MH", room_type=RoomType("bedroom"), area_m2=11.7,
+            width_m=None, length_m=None, source_token_ids=None, confidence=0.9,
+        )],
+        notes=None,
+    )
+    soft = check_grounding(extraction, refs, hard=False)
+    assert soft.hallucination_count == 0
+    assert soft.soft_signal_count == 1
+
+    hard = check_grounding(extraction, refs, hard=True)
+    assert hard.hallucination_count > 0

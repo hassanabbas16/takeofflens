@@ -37,6 +37,7 @@ RoomType.__doc__ = "English room type, mapped from the Finnish label."
 
 
 class Source(str, Enum):
+    RULES = "rules"  # no model call; the free baseline
     OCR_LLM = "ocr+llm"
     VLM = "vlm"
     HYBRID = "hybrid"
@@ -105,12 +106,20 @@ class PlanExtraction(BaseModel):
 
 
 class GroundingIssue(BaseModel):
-    """One reason a room failed grounding. Counted as a hallucination in metrics."""
+    """One thing grounding found wrong with a room.
+
+    ``hard`` separates a real failure from an advisory signal. A hard issue means the model
+    asserted something the page does not support - a hallucination. A soft issue means we
+    could not corroborate the claim from OCR, which on the ``vlm`` path is expected: the
+    vision model reads the image directly and OCR misses about half the printed areas, so
+    a disagreement there measures OCR, not the model.
+    """
 
     room_index: int
     label_raw: str
     kind: str  # unknown_token_id | ungrounded_area | missing_token_ids | ungrounded_label
     detail: str
+    hard: bool = True
 
 
 class GroundedExtraction(BaseModel):
@@ -123,7 +132,16 @@ class GroundedExtraction(BaseModel):
 
     @property
     def hallucination_count(self) -> int:
-        return len(self.issues)
+        """Hard failures only. Soft signals are reported separately and never counted here.
+
+        Counting soft signals as hallucinations would have made the vision model look like
+        it fabricated areas when it had in fact read areas that OCR missed.
+        """
+        return sum(1 for issue in self.issues if issue.hard)
+
+    @property
+    def soft_signal_count(self) -> int:
+        return sum(1 for issue in self.issues if not issue.hard)
 
 
 # --- API payloads ----------------------------------------------------------------------

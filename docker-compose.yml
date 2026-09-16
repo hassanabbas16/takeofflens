@@ -19,7 +19,9 @@ services:
     build: ./api
     environment:
       DATABASE_URL: ${DATABASE_URL}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      # ANTHROPIC_API_KEY is deliberately NOT passed here. The key is read from the
+      # mounted .env file only, so an ambient shell variable can never pay for this
+      # project's calls. See api/app/config.py.
       ANTHROPIC_TEXT_MODEL: ${ANTHROPIC_TEXT_MODEL}
       ANTHROPIC_VISION_MODEL: ${ANTHROPIC_VISION_MODEL}
       ANTHROPIC_MAX_TOKENS: ${ANTHROPIC_MAX_TOKENS:-8000}
@@ -36,6 +38,8 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
     volumes:
       - ./api:/app
+      # The key lives here and is read from the file, never from the environment.
+      - ./.env:/app/.env:ro
       - ./eval:/eval
       - takeoff_storage:/storage
       # Named volume for OCR weights. The image already carries them, so this only

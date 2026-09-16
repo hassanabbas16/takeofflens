@@ -1,8 +1,13 @@
 """The three extraction approaches, sharing one output schema.
 
+``rules``    OCR + parser + bbox-proximity pairing, no model call at all ($0)
 ``ocr+llm``  OCR tokens (ids + boxes) + pre-computed candidate pairs -> text model
 ``vlm``      the page image alone -> vision model
 ``hybrid``   the page image plus the OCR token list as hints -> vision model
+
+``rules`` is the baseline the paid approaches have to beat. It appears in every results
+table, because an LLM approach that does not clearly beat free deterministic machinery is
+not earning its cost.
 
 They differ only in what evidence they are given. The schema, the grounding step and the
 persistence path are identical, which is the point: the comparison in eval is then about the
@@ -32,7 +37,8 @@ from app.pipeline.pairing import (
     format_candidate_pairs,
     format_token_list,
 )
-from app.schemas import GroundedExtraction, PlanExtraction, Source
+from app.pipeline.room_types import is_known_label, primary_type
+from app.schemas import ExtractedRoom, GroundedExtraction, PlanExtraction, RoomType, Source
 
 logger = logging.getLogger(__name__)
 
@@ -280,3 +286,80 @@ Return every room you can identify."""
         notes=grounded.notes,
     )
     return ExtractionOutcome(Source.HYBRID, grounded, usage, refs)
+
+
+# --- rules (no LLM) ----------------------------------------------------------------------
+
+
+def extract_rules(tokens: list[OcrToken]) -> ExtractionOutcome:
+    """OCR + parser + bbox-proximity pairing, with no model call at all.
+
+    This is the floor every paid approach has to beat. It costs nothing, runs in under a
+    millisecond, and is fully deterministic - so if an LLM approach is not clearly ahead of
+    it, the LLM is not earning its cost. Including it in every results table keeps that
+    comparison honest rather than implicit.
+
+    It is pure machinery already built for other reasons: the Finnish lexicon decides what
+    is a room label, parse_dims decides what is an area (and excludes door codes), and the
+    pairing module associates the two by weighted bounding-box proximity. Anything needing
+    judgement - a garbled reading, a label with no nearby area, an ambiguous pairing - it
+    simply does not report.
+    """
+    refs = TokenRef.from_tokens(tokens)
+    pairs = find_candidate_pairs(refs)
+    paired_label_ids = {pair.label.id for pair in pairs}
+
+    rooms: list[ExtractedRoom] = []
+
+    for pair in pairs:
+        # label_text is the label alone; pair.label.text may be "khh 6.8" with the area
+        # glued on, which would make the label unrecognisable downstream.
+        label_text = pair.label_text or pair.label.text
+        room_type = primary_type(label_text)
+        rooms.append(
+            ExtractedRoom(
+                label_raw=label_text,
+                room_type=_as_room_type(room_type),
+                area_m2=pair.area_m2,
+                # Never derived: a pair is only reported when the page prints one.
+                width_m=None,
+                length_m=None,
+                source_token_ids=sorted({pair.label.id, pair.area.id}),
+                # Confidence is the OCR confidence of the weaker of the two tokens; there is
+                # no model opinion to report and inventing one would be dishonest.
+                confidence=round(min(pair.label.confidence, pair.area.confidence), 4),
+            )
+        )
+
+    # Labels with no nearby area are still rooms - they just have no area printed.
+    for ref in refs:
+        if ref.id in paired_label_ids or not is_known_label(ref.text):
+            continue
+        rooms.append(
+            ExtractedRoom(
+                label_raw=ref.text,
+                room_type=_as_room_type(primary_type(ref.text)),
+                area_m2=None,
+                width_m=None,
+                length_m=None,
+                source_token_ids=[ref.id],
+                confidence=round(ref.confidence, 4),
+            )
+        )
+
+    extraction = PlanExtraction(
+        rooms=rooms,
+        notes=f"rules approach: {len(pairs)} label/area pairs from {len(refs)} OCR tokens",
+    )
+    # Grounded by construction - every value came from a token - but run the same check so
+    # the column means the same thing in every row of the results table.
+    grounded = check_grounding(extraction, refs, hard=True, drop=False)
+    usage = LlmUsage(model="none (rules)", ok=True)
+    return ExtractionOutcome(Source.RULES, grounded, usage, refs)
+
+
+def _as_room_type(value: str) -> RoomType:
+    try:
+        return RoomType(value)
+    except ValueError:
+        return RoomType("other")

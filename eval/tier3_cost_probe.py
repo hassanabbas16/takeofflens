@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import statistics
 import sys
 import time
@@ -32,17 +33,25 @@ from app.pipeline.extract import (  # noqa: E402
     ExtractionOutcome,
     extract_hybrid,
     extract_ocr_llm,
+    extract_rules,
     extract_vlm,
 )
 from app.pipeline.ocr import OcrToken, run_ocr  # noqa: E402
 from app.pipeline.preprocess import PreprocessConfig, preprocess  # noqa: E402
-from app.pipeline.room_types import normalise_label  # noqa: E402
+from app.pipeline.room_types import label_key  # noqa: E402
 from app.pricing import get_pricing  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent))
 from svg_ground_truth import parse_model_svg, plan_dir, read_split  # noqa: E402
 
 AREA_TOLERANCE = 0.05
+
+# Fixed seed for the Tier 3 random sample, so the plan set is reproducible and auditable.
+# Recorded here rather than passed ad hoc: a sample nobody can regenerate is not a sample.
+SAMPLE_SEED = 20260917
+
+# Used by the spend cap before any page has been measured in this run.
+DEFAULT_PAGE_ESTIMATE = 0.010
 PRINTED_AREAS_PATH = Path(__file__).parent / "ground_truth" / "printed_areas_6.json"
 CACHE_DIR = Path("/eval/cache/llm")
 OCR_CACHE_DIR = Path("/eval/cache/ocr")
@@ -70,14 +79,14 @@ def ocr_tokens_cached(png: Path, plan_id: str, force: bool = False) -> list[OcrT
 
 def reference(svg_path: Path) -> tuple[set[str], list[float]]:
     plan = parse_model_svg(svg_path)
-    labels = {normalise_label(r.name) for r in plan.rooms if r.name}
+    labels = {label_key(r.name) for r in plan.rooms if r.name}
     labels.discard("")
     labels.discard("UNDEFINED")
     return labels, [r.area_m2 for r in plan.rooms if r.area_m2 >= 1.0]
 
 
 def score(outcome: ExtractionOutcome, labels: set[str], areas: list[float]) -> tuple[int, int]:
-    found_labels = {normalise_label(r.label_raw) for r in outcome.rooms}
+    found_labels = {label_key(r.label_raw) for r in outcome.rooms}
     matched_labels = sum(1 for label in labels if label in found_labels)
 
     remaining = [r.area_m2 for r in outcome.rooms if r.area_m2 is not None]
@@ -93,9 +102,17 @@ def score(outcome: ExtractionOutcome, labels: set[str], areas: list[float]) -> t
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--limit", type=int, default=6)
+    parser.add_argument("--limit", type=int, default=6,
+                        help="number of plans (the 6 validation plans by default)")
+    parser.add_argument("--sample", type=int, default=None,
+                        help="instead of the first N, take a random sample of this size")
+    parser.add_argument("--seed", type=int, default=SAMPLE_SEED,
+                        help="RNG seed for --sample (default: %(default)s, documented)")
     parser.add_argument("--approaches", nargs="*",
-                        default=["ocr+llm", "vlm", "hybrid"])
+                        default=["rules", "ocr+llm", "vlm", "hybrid"])
+    parser.add_argument("--max-spend", type=float, default=None,
+                        help=("hard cap in USD. Stops before a call that would take the "
+                              "running total past this, based on logged costs so far."))
     parser.add_argument("--dataset", type=Path,
                         default=Path(os.environ.get("DATASET_DIR", "/data/cubicasa5k")))
     parser.add_argument("--out", type=Path,
@@ -106,17 +123,32 @@ def main() -> int:
     settings = get_settings()
     pricing = get_pricing()
 
-    try:
-        client = LlmClient()
-    except LlmError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
+    # The client is built on first actual need, not up front: a run served entirely from
+    # cache, or one using only the free rules approach, must not require a key at all.
+    client_box: dict[str, LlmClient] = {}
+
+    def get_client() -> LlmClient | None:
+        if "client" not in client_box:
+            try:
+                client_box["client"] = LlmClient()
+            except LlmError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                client_box["client"] = None  # type: ignore[assignment]
+        return client_box["client"]
 
     printed = json.loads(PRINTED_AREAS_PATH.read_text(encoding="utf-8"))["plans"]
-    entries = [e for e in read_split(args.dataset, "test")
-               if e.strip("/").startswith("high_quality_architectural")][: args.limit]
+    all_arch = [e for e in read_split(args.dataset, "test")
+                if e.strip("/").startswith("high_quality_architectural")]
+    if args.sample:
+        rng = random.Random(args.seed)
+        entries = sorted(rng.sample(all_arch, min(args.sample, len(all_arch))))
+        print(f"sample: {len(entries)} of {len(all_arch)} plans, seed {args.seed}")
+    else:
+        entries = all_arch[: args.limit]
 
-    print(f"models: text={settings.anthropic_text_model} vision={settings.anthropic_vision_model}")
+    print(f"api key: {settings.api_key_source}")
+    print(f"models: text={settings.anthropic_text_model} "
+          f"vision={settings.anthropic_vision_model}")
     print(f"pricing: {pricing.source} checked {pricing.checked} ({pricing.mode} mode)")
     for model in {settings.anthropic_text_model, settings.anthropic_vision_model}:
         if not pricing.knows(model):
@@ -125,8 +157,12 @@ def main() -> int:
 
     results: dict[str, list[dict]] = {a: [] for a in args.approaches}
     ref_totals = {"labels": 0, "areas_svg": 0, "areas_printed": 0}
+    spend = {"total": 0.0, "worst_page": 0.0}
+    stop_reason: str | None = None
 
     for entry in entries:
+        if stop_reason:
+            break
         directory = plan_dir(args.dataset, entry)
         plan_id = directory.name
         labels, areas = reference(directory / "model.svg")
@@ -141,6 +177,8 @@ def main() -> int:
               f"{n_printed} printed areas")
 
         for approach in args.approaches:
+            if stop_reason:
+                break
             cache = CACHE_DIR / approach.replace("+", "_") / f"{plan_id}.json"
             if cache.exists() and not args.force:
                 row = json.loads(cache.read_text(encoding="utf-8"))
@@ -159,16 +197,37 @@ def main() -> int:
                       f"areas={row.get('areas')}/{n_printed} "
                       f"halluc={row.get('hallucinations')} {cost_str}")
                 continue
+            # Spend cap: refuse to start a call that could take the total past the cap,
+            # estimating from the most expensive page seen so far. Checked BEFORE the call,
+            # because afterwards the money is already spent.
+            if args.max_spend is not None and approach != "rules":
+                estimate = max(spend["worst_page"], DEFAULT_PAGE_ESTIMATE)
+                if spend["total"] + estimate > args.max_spend:
+                    stop_reason = (
+                        f"spend cap reached: ${spend['total']:.4f} spent, the next call "
+                        f"could cost up to ${estimate:.4f}, cap is ${args.max_spend:.2f}"
+                    )
+                    print(f"  STOPPING - {stop_reason}")
+                    break
+
             started = time.time()
-            if approach == "ocr+llm":
-                outcome = extract_ocr_llm(tokens, client)
-            elif approach == "vlm":
-                outcome = extract_vlm(image, client, tokens=tokens)
-            elif approach == "hybrid":
-                outcome = extract_hybrid(image, tokens, client)
+            if approach == "rules":
+                outcome = extract_rules(tokens)
             else:
-                print(f"  unknown approach {approach!r}", file=sys.stderr)
-                continue
+                client = get_client()
+                if client is None:
+                    stop_reason = "no API key available for model-backed approaches"
+                    print(f"  STOPPING - {stop_reason}")
+                    break
+                if approach == "ocr+llm":
+                    outcome = extract_ocr_llm(tokens, client)
+                elif approach == "vlm":
+                    outcome = extract_vlm(image, client, tokens=tokens)
+                elif approach == "hybrid":
+                    outcome = extract_hybrid(image, tokens, client)
+                else:
+                    print(f"  unknown approach {approach!r}", file=sys.stderr)
+                    continue
             elapsed = time.time() - started
 
             if not outcome.ok:
@@ -180,7 +239,10 @@ def main() -> int:
                 continue
 
             matched_labels, matched_areas = score(outcome, labels, areas)
-            cost = pricing.cost_usd(
+            # The rules approach makes no call, so its cost is exactly zero - not
+            # unknown. Reporting it as unknown would invite a reader to assume it
+            # might be expensive.
+            cost = 0.0 if approach == "rules" else pricing.cost_usd(
                 outcome.usage.model,
                 outcome.usage.input_tokens,
                 outcome.usage.output_tokens,
@@ -204,6 +266,9 @@ def main() -> int:
                 "attempts": outcome.usage.attempts,
             }
             results[approach].append(row)
+            if cost:
+                spend["total"] += cost
+                spend["worst_page"] = max(spend["worst_page"], cost)
             cache.parent.mkdir(parents=True, exist_ok=True)
             cache.write_text(json.dumps(row, indent=2), encoding="utf-8")
 
@@ -268,6 +333,11 @@ def main() -> int:
         else:
             lines.append(f"| {approach} | unknown |")
 
+    if stop_reason:
+        lines.append(f"\n> **RUN STOPPED EARLY** - {stop_reason}. The table above covers "
+                     "only the plans completed before the cap.\n")
+    cap_note = f" (cap ${args.max_spend:.2f})" if args.max_spend else ""
+    lines.append(f"\nMeasured spend this run: **${spend['total']:.4f}**{cap_note}\n")
     lines.append("\n**STOP.** This is the cost gate. The full run needs explicit approval.\n")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -275,7 +345,11 @@ def main() -> int:
     args.out.with_suffix(".json").write_text(
         json.dumps({"results": results, "reference": ref_totals}, indent=2), encoding="utf-8"
     )
-    print(f"\nwrote {args.out}")
+    cap_note = f" (cap ${args.max_spend:.2f})" if args.max_spend else ""
+    print(f"\nmeasured spend this run: ${spend['total']:.4f}{cap_note}")
+    if stop_reason:
+        print(f"RUN STOPPED EARLY: {stop_reason}")
+    print(f"wrote {args.out}")
     print("\nSTOP: cost gate. The full run needs explicit approval.")
     return 0
 

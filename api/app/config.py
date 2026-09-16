@@ -1,9 +1,42 @@
 """Application settings. Every environment-specific value lives here, never inline."""
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# The project .env, mounted read-only into the container. API keys are read from THIS FILE
+# ONLY - never from the process environment. A shell that happens to export ANTHROPIC_API_KEY
+# (a developer machine, a CI runner, an agent session) would otherwise silently supply a
+# different key than the one the project is configured with, and the first cost-gate run in
+# this project did exactly that.
+ENV_FILE = Path(os.environ.get("TAKEOFFLENS_ENV_FILE", "/app/.env"))
+
+
+def read_env_file_value(key: str, path: Path = ENV_FILE) -> str:
+    """Read one value from the .env file, ignoring the process environment entirely.
+
+    Returns "" when the file or key is absent, so callers fail with a clear message rather
+    than falling back to an ambient credential.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        if name.strip() != key:
+            continue
+        value = value.strip()
+        # Strip optional surrounding quotes.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        return value
+    return ""
 
 
 class Settings(BaseSettings):
@@ -12,7 +45,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://takeofflens:change_me_locally@db:5432/takeofflens"
 
     # Anthropic. Model names are env-driven so they are never hardcoded in pipeline logic.
-    anthropic_api_key: str = ""
+    # NOTE: the API key is deliberately NOT a settings field - see api_key() below.
     anthropic_text_model: str = ""
     anthropic_vision_model: str = ""
     anthropic_timeout_seconds: float = 120.0
@@ -70,6 +103,25 @@ class Settings(BaseSettings):
 
     max_upload_mb: int = 20
     cors_origins: str = "http://localhost:3000"
+
+    @property
+    def anthropic_api_key(self) -> str:
+        """The API key, read from the project .env file and nowhere else.
+
+        Deliberately not a pydantic-settings field: those read the process environment, and
+        an ambient ANTHROPIC_API_KEY must never be able to pay for this project's calls.
+        """
+        return read_env_file_value("ANTHROPIC_API_KEY")
+
+    @property
+    def api_key_source(self) -> str:
+        """Where the key came from, for reporting. Never returns the key itself."""
+        key = self.anthropic_api_key
+        if not key:
+            return f"absent (looked in {ENV_FILE})"
+        if key.startswith("sk-ant-replace"):
+            return f"placeholder in {ENV_FILE}"
+        return f"{ENV_FILE} (prefix {key[:14]}..., {len(key)} chars)"
 
     @property
     def ocr_orientation_list(self) -> list[int]:

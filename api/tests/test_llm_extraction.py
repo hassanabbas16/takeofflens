@@ -506,3 +506,165 @@ def test_pydantic_model_accepted_by_the_sdk_as_an_output_format():
     params = inspect.signature(anthropic.Anthropic(api_key="sk-ant-x").messages.parse).parameters
     assert "output_format" in params
     assert "max_tokens" in params
+
+
+# --- batch API -------------------------------------------------------------------------
+
+
+def test_batch_discount_is_half_of_standard(tmp_path):
+    table = load_pricing(_pricing_file(tmp_path))
+    standard = table.cost_usd("claude-haiku-4-5", 1_000_000, 1_000_000)
+    batched = table.cost_usd("claude-haiku-4-5", 1_000_000, 1_000_000, batch=True)
+    assert batched == pytest.approx(standard / 2)
+
+
+def test_batch_request_carries_a_json_schema_not_the_parse_helper():
+    """Batch requests take raw params, so structured output goes via output_config."""
+    from app.batch import BatchItem, build_request
+
+    item = BatchItem(
+        custom_id="plan-1191",
+        model="claude-haiku-4-5",
+        system="rules",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=8000,
+    )
+    request = build_request(item)
+    assert request["custom_id"] == "plan-1191"
+    params = request["params"]
+    assert params["max_tokens"] == 8000
+    assert params["system"] == "rules"
+    assert params["output_config"]["format"]["type"] == "json_schema"
+    assert "rooms" in params["output_config"]["format"]["schema"]["properties"]
+
+
+def test_batch_results_are_matched_by_custom_id_not_position():
+    """Results come back in any order; positional matching would mix up plans."""
+    from app.batch import BatchItem, submit_and_wait
+
+    extraction = PlanExtraction(rooms=[room(label="MH")], notes=None)
+    other = PlanExtraction(rooms=[room(label="OH")], notes=None)
+
+    def message_for(payload):
+        return SimpleNamespace(
+            stop_reason="end_turn",
+            content=[SimpleNamespace(type="text", text=payload.model_dump_json())],
+            usage=SimpleNamespace(
+                input_tokens=10, output_tokens=5,
+                cache_read_input_tokens=0, cache_creation_input_tokens=0,
+            ),
+        )
+
+    class FakeBatches:
+        def create(self, requests):
+            return SimpleNamespace(id="batch_1")
+
+        def retrieve(self, batch_id):
+            return SimpleNamespace(id=batch_id, processing_status="ended")
+
+        def results(self, batch_id):
+            # Deliberately reversed relative to the submitted order.
+            return [
+                SimpleNamespace(custom_id="b", result=SimpleNamespace(
+                    type="succeeded", message=message_for(other))),
+                SimpleNamespace(custom_id="a", result=SimpleNamespace(
+                    type="succeeded", message=message_for(extraction))),
+            ]
+
+    client = SimpleNamespace(messages=SimpleNamespace(batches=FakeBatches()))
+    items = [
+        BatchItem("a", "claude-haiku-4-5", None, [{"role": "user", "content": "x"}], 100),
+        BatchItem("b", "claude-haiku-4-5", None, [{"role": "user", "content": "y"}], 100),
+    ]
+    outcomes = submit_and_wait(client, items, poll_seconds=0)
+
+    assert outcomes["a"].parsed.rooms[0].label_raw == "MH"
+    assert outcomes["b"].parsed.rooms[0].label_raw == "OH"
+
+
+def test_batch_missing_result_is_reported_not_silently_dropped():
+    from app.batch import BatchItem, submit_and_wait
+
+    class FakeBatches:
+        def create(self, requests):
+            return SimpleNamespace(id="batch_1")
+
+        def retrieve(self, batch_id):
+            return SimpleNamespace(id=batch_id, processing_status="ended")
+
+        def results(self, batch_id):
+            return []
+
+    client = SimpleNamespace(messages=SimpleNamespace(batches=FakeBatches()))
+    items = [BatchItem("a", "m", None, [{"role": "user", "content": "x"}], 100)]
+    outcomes = submit_and_wait(client, items, poll_seconds=0)
+    assert not outcomes["a"].ok
+    assert "no result" in outcomes["a"].error
+
+
+def test_batch_max_tokens_stop_reason_is_a_failure():
+    from app.batch import BatchItem, submit_and_wait
+
+    class FakeBatches:
+        def create(self, requests):
+            return SimpleNamespace(id="b1")
+
+        def retrieve(self, batch_id):
+            return SimpleNamespace(id=batch_id, processing_status="ended")
+
+        def results(self, batch_id):
+            return [SimpleNamespace(custom_id="a", result=SimpleNamespace(
+                type="succeeded",
+                message=SimpleNamespace(
+                    stop_reason="max_tokens", content=[],
+                    usage=SimpleNamespace(
+                        input_tokens=1, output_tokens=1,
+                        cache_read_input_tokens=0, cache_creation_input_tokens=0),
+                ),
+            ))]
+
+    client = SimpleNamespace(messages=SimpleNamespace(batches=FakeBatches()))
+    items = [BatchItem("a", "m", None, [{"role": "user", "content": "x"}], 100)]
+    outcomes = submit_and_wait(client, items, poll_seconds=0)
+    assert not outcomes["a"].ok
+    assert "max_tokens" in outcomes["a"].error
+
+
+# --- api key source --------------------------------------------------------------------
+
+
+def test_api_key_is_read_from_the_env_file_not_the_environment(tmp_path, monkeypatch):
+    """An ambient ANTHROPIC_API_KEY must never pay for this project's calls."""
+    from app.config import read_env_file_value
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("ANTHROPIC_API_KEY=sk-ant-from-file\n", encoding="utf-8")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-from-environment")
+
+    assert read_env_file_value("ANTHROPIC_API_KEY", env_file) == "sk-ant-from-file"
+
+
+def test_missing_env_file_yields_empty_not_the_environment(tmp_path, monkeypatch):
+    from app.config import read_env_file_value
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-from-environment")
+    assert read_env_file_value("ANTHROPIC_API_KEY", tmp_path / "absent.env") == ""
+
+
+def test_env_file_values_may_be_quoted(tmp_path):
+    from app.config import read_env_file_value
+
+    env_file = tmp_path / ".env"
+    env_file.write_text('ANTHROPIC_API_KEY="sk-ant-quoted"\n', encoding="utf-8")
+    assert read_env_file_value("ANTHROPIC_API_KEY", env_file) == "sk-ant-quoted"
+
+
+def test_env_file_comments_and_blanks_ignored(tmp_path):
+    from app.config import read_env_file_value
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "# ANTHROPIC_API_KEY=sk-ant-commented-out\n\nANTHROPIC_API_KEY=sk-ant-real\n",
+        encoding="utf-8",
+    )
+    assert read_env_file_value("ANTHROPIC_API_KEY", env_file) == "sk-ant-real"

@@ -22,6 +22,10 @@ mode: standard
 currency: USD
 unit: per_1m_tokens
 
+# Batch API requests are billed at 50% of the standard rates below, on both input and
+# output. Cost code applies this multiplier rather than duplicating the whole table.
+batch_multiplier: 0.5
+
 models:
   claude-haiku-4-5:
     input: 1.00

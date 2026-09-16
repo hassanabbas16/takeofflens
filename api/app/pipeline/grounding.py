@@ -55,7 +55,8 @@ def check_grounding(
 ) -> GroundedExtraction:
     """Validate an extraction against the OCR tokens it claims to come from.
 
-    ``hard=False`` records issues without marking rooms ungrounded - used for ``vlm``.
+    ``hard=False`` records issues as advisory signals without marking rooms ungrounded or
+    counting them as hallucinations - used for ``vlm``.
     """
     valid_ids = {ref.id for ref in refs}
     available_areas = _parsed_areas(refs)
@@ -75,6 +76,7 @@ def check_grounding(
                         label_raw=room.label_raw,
                         kind="missing_token_ids",
                         detail="no source_token_ids cited although OCR tokens were provided",
+                        hard=True,
                     )
                 )
             else:
@@ -86,6 +88,7 @@ def check_grounding(
                             label_raw=room.label_raw,
                             kind="unknown_token_id",
                             detail=f"cited token ids that do not exist on this page: {unknown}",
+                            hard=True,
                         )
                     )
 
@@ -99,6 +102,9 @@ def check_grounding(
                         f"area {room.area_m2:g} m2 does not match any area parsed from an "
                         "OCR token on this page"
                     ),
+                    # In soft mode this is advisory: the model may have read an area OCR
+                    # missed, which is common on these plans.
+                    hard=hard,
                 )
             )
 

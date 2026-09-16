@@ -53,10 +53,19 @@ class CandidatePair:
     area: TokenRef
     area_m2: float
     distance: float
+    # True when one token carried both the label and the area ("khh 6.8").
+    combined: bool = False
+    # The label text alone, with any area stripped off.
+    label_text: str = ""
 
     def as_prompt_line(self) -> str:
+        if self.combined:
+            return (
+                f'  label id={self.label.id} "{self.label_text}"'
+                f'  area from the same token "{self.label.text}" -> {self.area_m2:g} m2'
+            )
         return (
-            f'  label id={self.label.id} "{self.label.text}"'
+            f'  label id={self.label.id} "{self.label_text or self.label.text}"'
             f'  area id={self.area.id} "{self.area.text}" -> {self.area_m2:g} m2'
         )
 
@@ -81,15 +90,45 @@ def find_candidate_pairs(refs: list[TokenRef]) -> list[CandidatePair]:
 
     One pair per label: the nearest area wins. Areas may be offered to more than one label,
     because resolving that contention needs the page context the model has and we do not.
+
+    A token that already carries both ("khh 6.8") pairs with **itself**. Before this was
+    handled, such a token appeared in both the label list and the area list, was forbidden
+    from matching itself, and so was paired with some other room's area - producing a
+    confidently wrong pair rather than a missing one. Ten of the twenty-six tokens on one
+    real plan were of this form.
     """
-    labels = [r for r in refs if is_known_label(r.text) or parse(r.text).label is not None]
+    combined: list[CandidatePair] = []
+    combined_ids: set[int] = set()
+    for ref in refs:
+        result = parse(ref.text)
+        if (
+            result.kind is DimKind.AREA
+            and result.area_m2 is not None
+            and result.plausible
+            and result.label
+        ):
+            combined.append(
+                CandidatePair(
+                    label=ref, area=ref, area_m2=result.area_m2, distance=0.0,
+                    combined=True, label_text=result.label,
+                )
+            )
+            combined_ids.add(ref.id)
+
+    labels = [
+        r for r in refs
+        if r.id not in combined_ids and (is_known_label(r.text) or parse(r.text).label)
+    ]
     areas: list[tuple[TokenRef, float]] = []
     for ref in refs:
+        if ref.id in combined_ids:
+            # Already spoken for: this token's area belongs to its own label.
+            continue
         result = parse(ref.text)
         if result.kind is DimKind.AREA and result.area_m2 is not None and result.plausible:
             areas.append((ref, result.area_m2))
 
-    pairs: list[CandidatePair] = []
+    pairs: list[CandidatePair] = list(combined)
     for label in labels:
         limit = _label_height(label.bbox) * MAX_DISTANCE_IN_LABEL_HEIGHTS
         best: tuple[TokenRef, float, float] | None = None
@@ -104,7 +143,8 @@ def find_candidate_pairs(refs: list[TokenRef]) -> list[CandidatePair]:
         if best is not None:
             pairs.append(
                 CandidatePair(
-                    label=label, area=best[0], area_m2=best[1], distance=round(best[2], 1)
+                    label=label, area=best[0], area_m2=best[1],
+                    distance=round(best[2], 1), label_text=label.text,
                 )
             )
     return sorted(pairs, key=lambda p: p.label.id)

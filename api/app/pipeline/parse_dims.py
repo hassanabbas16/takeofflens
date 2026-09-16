@@ -48,7 +48,13 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 
-from app.pipeline.room_types import UNKNOWN, is_known_label, normalise_label, primary_type
+from app.pipeline.room_types import (
+    UNKNOWN,
+    is_known_label,
+    normalise_label,
+    primary_type,
+    resolve_label,
+)
 
 # Areas outside this range are flagged implausible. A 1 m2 room is smaller than a shower
 # tray; 500 m2 is larger than any single room in a residential plan.
@@ -154,7 +160,11 @@ _IMPERIAL_PAIR_RE = re.compile(rf"^{_FEET_IN}\s*[x×X]\s*{_FEET_IN}$")
 _AREA_RE = re.compile(rf"^({_NUM})\s*({_AREA_UNIT})?$")
 
 # Label plus area in a single token: "MH 11.7", "KHH 10,8 m²"
-_LABEL_AREA_RE = re.compile(rf"^([A-Za-zÄÖÅäöå][A-Za-zÄÖÅäöå.+/]*)\s+({_NUM})\s*(?:{_AREA_UNIT})?$")
+# The label may be several words ("TYO HUONE") because OCR inserts spaces inside a word,
+# and may carry an area unit. Everything before the final number is the label.
+_LABEL_AREA_RE = re.compile(
+    rf"^([A-Za-zÄÖÅäöå][A-Za-zÄÖÅäöå.+/ ]*?)\s+({_NUM})\s*(?:{_AREA_UNIT})?$"
+)
 
 
 def _feet_inches_to_m(feet: str, inches: str | None) -> float:
@@ -293,7 +303,8 @@ def parse(text: str) -> ParseResult:
     label_area = _LABEL_AREA_RE.match(raw)
     if label_area:
         label, number = label_area.group(1), label_area.group(2)
-        if is_known_label(label):
+        resolved = resolve_label(label)
+        if resolved is not None:
             return _area_result(
                 _to_float(number), raw, "label_area", label=label,
                 explicit_unit=bool(re.search(_AREA_UNIT, raw)),

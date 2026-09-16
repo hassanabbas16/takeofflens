@@ -11,6 +11,7 @@ select = ["E", "F", "I", "UP", "B", "ANN", "BLE", "RUF"]
 "app/pipeline/parse_dims.py" = ["RUF001"]
 # The Anthropic SDK does not export its response types, so Any is the honest annotation.
 "app/llm.py" = ["ANN401"]
+"app/batch.py" = ["ANN401"]
 "tests/test_parse_dims.py" = ["RUF001"]
 "tests/*" = ["ANN"]
 "alembic/*" = ["ANN", "E501"]

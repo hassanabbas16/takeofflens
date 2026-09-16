@@ -38,6 +38,7 @@ class PricingTable:
     source: str
     mode: str
     models: dict[str, ModelPrice]
+    batch_multiplier: float = 0.5
 
     def cost_usd(
         self,
@@ -46,8 +47,13 @@ class PricingTable:
         output_tokens: int,
         cache_read_tokens: int = 0,
         cache_write_tokens: int = 0,
+        batch: bool = False,
     ) -> float | None:
-        """Cost in USD. The four counters are independent and are summed, not netted."""
+        """Cost in USD. The four counters are independent and are summed, not netted.
+
+        ``batch=True`` applies the Batch API discount, which is a flat multiplier on every
+        counter rather than a separate price table.
+        """
         price = self.models.get(model)
         if price is None:
             return None
@@ -59,6 +65,8 @@ class PricingTable:
             + cache_read_tokens * read_rate
             + cache_write_tokens * write_rate
         ) / PER_MILLION
+        if batch:
+            total *= self.batch_multiplier
         return round(total, 6)
 
     def knows(self, model: str) -> bool:
@@ -86,6 +94,7 @@ def load_pricing(path: Path | None = None) -> PricingTable:
         source=str(data.get("source", "")),
         mode=str(data.get("mode", "standard")),
         models=models,
+        batch_multiplier=float(data.get("batch_multiplier", 0.5)),
     )
 
 

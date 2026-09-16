@@ -167,11 +167,16 @@ this, including proof that door codes are never read as room dimensions.
 
 ## Extraction: three approaches, one schema
 
-| Approach | Evidence given to the model | Citations |
-| --- | --- | --- |
-| `ocr+llm` | OCR tokens with ids and boxes, plus candidate label/area pairs | required |
-| `vlm` | the page image alone, downscaled | none |
-| `hybrid` | the page image **and** the OCR token list as hints | where used |
+| Approach | Evidence given to the model | Citations | Cost |
+| --- | --- | --- | --- |
+| `rules` | none - OCR + parser + pairing, no model call | by construction | **$0** |
+| `ocr+llm` | OCR tokens with ids and boxes, plus candidate label/area pairs | required | paid |
+| `vlm` | the page image alone, downscaled | none | paid |
+| `hybrid` | the page image **and** the OCR token list as hints | where used | paid |
+
+`rules` is the baseline every paid approach has to beat. It is deterministic, instant and
+free, so an LLM approach that does not clearly beat it is not earning its cost. It appears
+in every results table for exactly that reason.
 
 All three return the same Pydantic schema via Structured Outputs in strict mode, so the eval
 comparison is about the evidence rather than three different pipelines.
@@ -222,37 +227,126 @@ if ignored:** `input_tokens` *excludes* cached tokens, and cache reads and cache
 separate counters with their own rates (a read is 0.1x base input; a 5-minute write is
 1.25x). The four counters are summed independently rather than netted.
 
+### API keys
+
+The key is read from the project `.env` file **and nowhere else** - never from the process
+environment. `docker-compose.yml` does not pass `ANTHROPIC_API_KEY` through, and
+`app/config.py` parses the mounted `.env` directly.
+
+This is deliberate. The first cost-gate run in this project was paid for by an
+`ANTHROPIC_API_KEY` that happened to be exported in the developer's shell, silently
+overriding the placeholder in `.env`. A key that can be picked up by accident can be spent
+by accident.
+
 ### Running the cost gate
 
 ```bash
 # needs a real ANTHROPIC_API_KEY in .env
-docker compose run --rm api python /eval/tier3_cost_probe.py
+docker compose run --rm api python /eval/tier3_cost_probe.py --max-spend 1.00
 ```
+
+`--max-spend` is a hard cap. Before each call it compares the running total (from logged
+token costs) against the cap, using the most expensive page seen so far as the estimate, and
+stops the run if the next call could exceed it. It is checked *before* the call, because
+afterwards the money is already gone. The `rules` approach is never gated - it costs nothing.
+
+### Tier 3 scope
+
+Tier 3 is a **50-plan random sample** of the `high_quality_architectural` test split, drawn
+with a fixed seed (`SAMPLE_SEED = 20260917`, recorded in `eval/tier3_cost_probe.py`) so the
+plan set is reproducible and auditable:
+
+```bash
+docker compose run --rm api python /eval/tier3_cost_probe.py --sample 50 --max-spend 1.00
+```
+
+### Batch API
+
+The full run uses the Message Batches API, billed at **50% of standard rates** on both input
+and output. Latency becomes minutes rather than seconds, which is irrelevant for an eval
+sweep and unacceptable for the interactive upload path - so batching lives in `app/batch.py`,
+not in the request path.
+
+Batch requests carry raw parameters rather than the `messages.parse` helper, so structured
+output is requested with `output_config.format` and validated against the same Pydantic model
+on the way back. Results are matched by `custom_id`, never by position.
+
+### Image resolution
+
+Image tokens scale with pixel count, so shrinking the page looks like an obvious lever.
+`eval/resolution_sweep.py --dry-run` projects it arithmetically at no cost:
+
+| Long edge | Image tokens | Est. $/page | vs 1536 |
+| --- | --- | --- | --- |
+| 1536 | 2,167 | $0.0066 | 100% |
+| 1024 | 1,048 | $0.0055 | 83% |
+| 768 | 589 | $0.0050 | 76% |
+| 512 | 261 | $0.0047 | 71% |
+
+**Resolution is a weak lever here.** Dropping to a quarter of the pixels saves only 24%,
+because output tokens (~810 at $5/MTok) dominate the bill, not the image. Running the sweep
+for real measures whether label recall survives each step - the cost case alone does not
+justify the reduction.
 
 Runs all three approaches over the 6 validation plans, reports labels found, areas found,
 hallucinations, latency and measured cost per page, extrapolates the full 270-plan run, and
 then stops. Responses are cached per (plan, approach), so a re-run costs nothing.
 
-### Measured results — 6 plans, `claude-haiku-4-5`
+### Measured results - 6 plans, `claude-haiku-4-5`
 
 | Approach | Labels | Areas (printed) | Spurious | Hallucinations | Mean latency | Cost/page |
 | --- | --- | --- | --- | --- | --- | --- |
+| **`rules`** | **36/62** | 7/29 | 4 | **0** | **0.0s** | **$0** |
 | `ocr+llm` | 31/62 | 7/29 | 3 | 2 | 12.4s | $0.0062 |
-| `vlm` | **37/62** | 3/29 | 0 | 2 | **8.6s** | $0.0075 |
+| `vlm` | **37/62** | 3/29 | 0 | 2 | 8.6s | $0.0075 |
 | `hybrid` | 32/62 | **8/29** | 3 | 2 | 18.3s | $0.0088 |
 
-Total spend for the gate: **$0.135** across 18 calls. Full 270-plan split projects to
-$1.67–$2.38 per approach.
+Total spend for the gate: **$0.135** across 18 calls.
 
-The split is informative: the vision model reads **labels** best (it sees rotated text OCR
-mangles) but **areas** worst (the small figures under each label). Adding OCR tokens back in
-(`hybrid`) recovers areas at the cost of label recall and latency. Numbers are from
-[eval/results/tier3_cost_probe.md](eval/results/tier3_cost_probe.md) and are measured, not
-estimated — the per-page cost comes from logged token counts against `eval/pricing.yaml`.
+**The free rules baseline is competitive.** It beats `ocr+llm` on labels, ties it on areas,
+and sits one label behind the best paid approach - at zero cost, zero latency and zero
+hallucinations. That is the most important number in this table, and the reason `rules`
+appears in all of them.
 
-Caveat on the denominators: "Areas (printed)" counts only the 2 of 6 plans that print
-per-room areas. "Spurious" are area matches on the 4 plans that print none — numbers that
-landed within tolerance of an annotation polygon. All 6 hallucinations are on plan 2207.
+Two caveats, both material:
+
+- The `rules` row benefits from the pairing and parser fixes below; the three LLM rows are
+  cached from **before** those fixes. Re-running them costs money and has not been done, so
+  this comparison is not yet apples-to-apples and is marked as such wherever it appears.
+- "Areas (printed)" counts only the 2 of 6 plans that print per-room areas. "Spurious" are
+  matches on the 4 plans that print none.
+
+The paid approaches still differ informatively: the vision model reads **labels** best (it
+sees rotated text OCR mangles) but **areas** worst (the small figures under each label).
+Adding OCR tokens back (`hybrid`) recovers areas at the cost of label recall and latency.
+
+### Where area recall actually goes
+
+A single "areas found" number hid three unrelated failures. `eval/funnel.py` walks each
+printed area through the pipeline using only the OCR cache, so it costs nothing:
+
+| Stage | Before fixes | After fixes |
+| --- | --- | --- |
+| printed on the page | 29/29 | 29/29 |
+| OCR read the digits | 20/29 | 20/29 |
+| parser called it an AREA | 18/29 | **20/29** |
+| paired with a label | 12/29 | **16/29** |
+
+Three real bugs, each found by the funnel rather than by guessing:
+
+1. **Combined tokens paired with the wrong room.** `khh 6.8` is one OCR token carrying both
+   label and area. It appeared in both the label list and the area list, was forbidden from
+   matching itself, and so was paired with *another* room's area - a confidently wrong
+   answer rather than a missing one. Ten of 26 tokens on one plan were of this form. Such
+   tokens now pair with themselves.
+2. **OCR near-misses were discarded.** `KEITTIO` came back as `keittlo` (I read as L) and was
+   rejected as an unknown label, losing a real area. Labels of 5+ characters now tolerate a
+   one-character slip; short dense abbreviations (`K`, `H`, `S`, `WC`) never do.
+3. **Multi-word labels did not match.** OCR split `autovaja 19.5` into `autova ja 19.5`.
+
+The remaining losses are upstream OCR, not logic: 9 areas whose digits OCR never read, and 3
+on plan 1191 whose *labels* OCR never read, so there is nothing to pair with. Both are OCR
+recall problems and are recorded as such rather than papered over.
 
 ## Dataset
 
