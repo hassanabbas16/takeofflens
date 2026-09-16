@@ -3,9 +3,9 @@
 Blueprint analysis: upload an architectural floor plan, extract rooms, dimensions and areas
 with OCR + LLM, and review the results with bounding-box overlays.
 
-> **Status: Phase 3.** Ingest, preprocessing, OCR, dimension parsing and all three
-> extraction approaches are built and measured on a 6-plan cost gate. API routes, viewer and
-> the full eval land in later phases. This README is replaced with the full write-up in Phase 7. No accuracy numbers
+> **Status: Phase 4.** Pipeline, four extraction approaches, API routes, background
+> processing and export are working end to end. The viewer (Phase 5) and the full eval
+> (Phase 6) are next. This README is replaced with the full write-up in Phase 7. No accuracy numbers
 > appear here until they have actually been measured.
 
 ## Quick start
@@ -347,6 +347,44 @@ Three real bugs, each found by the funnel rather than by guessing:
 The remaining losses are upstream OCR, not logic: 9 areas whose digits OCR never read, and 3
 on plan 1191 whose *labels* OCR never read, so there is nothing to pair with. Both are OCR
 recall problems and are recorded as such rather than papered over.
+
+## API
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /plans` | multipart upload; returns `202` with `{id, status}` and processes in the background |
+| `GET /plans/{id}` | status, pages, OCR tokens and rooms; `?source=` filters by approach |
+| `GET /plans/{id}/pages/{n}/image` | the rendered page, for the viewer overlay |
+| `GET /plans/{id}/export?format=csv\|json&source=...` | takeoff export |
+| `GET /plans/{id}/tokens` | every OCR token, for the bbox overlay |
+| `GET /health` | database and dataset-mount status |
+
+Uploads are capped at 20 MB, checked **while streaming** rather than after buffering, so an
+oversized upload costs the limit rather than the sender's chosen size. Only `.pdf`, `.png`
+and `.jpg` are accepted, by both extension and content type.
+
+`POST /plans` returns **202 Accepted**, not 200: the work has been accepted, not finished.
+The client polls `GET /plans/{id}` until `status` is `done` or `failed`. A failed job always
+carries a message — a job that crashes silently leaves a plan stuck in `processing` forever.
+
+### Which approaches run on an upload
+
+`PIPELINE_APPROACHES` controls this and defaults to **`rules` only**. An uploaded plan should
+never silently spend money on model calls; paid approaches are opted into:
+
+```bash
+PIPELINE_APPROACHES=rules,hybrid
+```
+
+If a paid approach is configured but no API key is present, the job logs a warning and
+continues with `rules` rather than failing — a partial result beats no result.
+
+### Moving to a queue
+
+Processing runs as a FastAPI `BackgroundTask`. `jobs.process_plan(plan_id, source_path)`
+takes only a plan id and a path and owns its own database session, so moving to Celery/RQ/SQS
+means calling the same function from a worker instead of from `BackgroundTasks`. Nothing
+else changes. That is the only reason the signature is that shape.
 
 ## Dataset
 

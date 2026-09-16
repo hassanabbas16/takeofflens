@@ -8,6 +8,7 @@ from sqlalchemy import text
 
 from app.config import get_settings
 from app.db import engine
+from app.routes import plans
 
 settings = get_settings()
 
@@ -20,6 +21,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+app.include_router(plans.router)
 
 
 @app.get("/health")

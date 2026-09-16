@@ -101,8 +101,16 @@ class Settings(BaseSettings):
     # "tall_only" (default), "both" or "off" - see ocr.orientation_is_plausible.
     ocr_dedup_aspect_rule: str = "tall_only"
 
+    # Which extraction approaches run on an uploaded plan. Default is the free one only:
+    # an upload should never silently spend money. Paid approaches are opted into.
+    pipeline_approaches: str = "rules"
+
     max_upload_mb: int = 20
     cors_origins: str = "http://localhost:3000"
+
+    @property
+    def pipeline_approach_list(self) -> list[str]:
+        return [a.strip() for a in self.pipeline_approaches.split(",") if a.strip()]
 
     @property
     def anthropic_api_key(self) -> str:

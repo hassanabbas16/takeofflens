@@ -115,7 +115,10 @@ def normalise_label(text: str) -> str:
     return re.sub(r"[^A-Z0-9+]", "", text)
 
 
-_TRAILING_INDEX_RE = re.compile(r"^([A-Z]+)\d{1,2}$")
+# Requires at least TWO letters before the index. A single letter plus a digit ("H7", "K9")
+# is far more often OCR noise than a numbered room, and accepting it invented rooms from
+# stray tokens on a real upload.
+_TRAILING_INDEX_RE = re.compile(r"^([A-Z]{2,})\d{1,2}$")
 
 
 def lookup(text: str) -> str:

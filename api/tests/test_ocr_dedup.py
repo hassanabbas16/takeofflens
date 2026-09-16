@@ -377,3 +377,58 @@ def test_soft_grounding_issues_are_not_counted_as_hallucinations():
 
     hard = check_grounding(extraction, refs, hard=True)
     assert hard.hallucination_count > 0
+
+
+def test_one_area_is_not_shared_between_several_rooms():
+    """Observed live: four rooms all got area 16.0 from one stray token."""
+    from app.pipeline.pairing import TokenRef, find_candidate_pairs
+
+    area = TokenRef(id=99, text="16.0", confidence=0.9, bbox=(300, 700, 360, 760))
+    refs = [
+        TokenRef(id=0, text="KH", confidence=0.9, bbox=(334, 591, 364, 630)),
+        TokenRef(id=1, text="WC", confidence=0.9, bbox=(335, 654, 362, 690)),
+        TokenRef(id=2, text="ET", confidence=0.9, bbox=(334, 793, 372, 830)),
+        area,
+    ]
+    pairs = find_candidate_pairs(refs)
+    claimed = [p for p in pairs if p.area.id == 99]
+    assert len(claimed) == 1, [p.label_text for p in claimed]
+
+
+def test_the_closest_label_wins_a_contested_area():
+    from app.pipeline.pairing import TokenRef, find_candidate_pairs
+
+    refs = [
+        TokenRef(id=0, text="KH", confidence=0.9, bbox=(100, 100, 130, 130)),
+        TokenRef(id=1, text="WC", confidence=0.9, bbox=(100, 400, 130, 430)),
+        TokenRef(id=2, text="16.0", confidence=0.9, bbox=(100, 135, 150, 160)),
+    ]
+    pairs = [p for p in find_candidate_pairs(refs) if p.area.id == 2]
+    assert len(pairs) == 1
+    assert pairs[0].label_text == "KH"
+
+
+def test_a_label_losing_a_contested_area_still_appears_as_a_room():
+    """Losing the contest means no area, not disappearing."""
+    from app.pipeline.extract import extract_rules
+    from app.pipeline.ocr import OcrToken
+
+    outcome = extract_rules([
+        OcrToken(text="KH", confidence=0.9, bbox=(100, 100, 130, 130), angle=0),
+        OcrToken(text="WC", confidence=0.9, bbox=(100, 180, 130, 210), angle=0),
+        OcrToken(text="16.0", confidence=0.9, bbox=(100, 135, 150, 160), angle=0),
+    ])
+    by_label = {r.label_raw: r.area_m2 for r in outcome.rooms}
+    assert set(by_label) == {"KH", "WC"}
+    assert sorted(v is None for v in by_label.values()) == [False, True]
+
+
+def test_single_letter_plus_digit_is_not_a_room():
+    """"H7" came out of OCR noise and became a "room" on a real upload."""
+    from app.pipeline.extract import extract_rules
+    from app.pipeline.ocr import OcrToken
+
+    outcome = extract_rules([
+        OcrToken(text="H7", confidence=0.65, bbox=(100, 100, 130, 130), angle=0),
+    ])
+    assert outcome.rooms == []

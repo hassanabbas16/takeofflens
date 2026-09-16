@@ -88,8 +88,11 @@ def _label_height(bbox: BBox) -> float:
 def find_candidate_pairs(refs: list[TokenRef]) -> list[CandidatePair]:
     """Pair every plausible room label with its nearest plausible area token.
 
-    One pair per label: the nearest area wins. Areas may be offered to more than one label,
-    because resolving that contention needs the page context the model has and we do not.
+    One pair per label, and **one label per area**: a printed area belongs to exactly one
+    room. Letting several labels share the nearest area produced four rooms with an
+    identical 16.0 m2 on a plan that prints no areas at all - a confident fabrication from
+    one stray token. When labels contend for an area the closest wins and the others are
+    reported with no area, which is the truthful outcome.
 
     A token that already carries both ("khh 6.8") pairs with **itself**. Before this was
     handled, such a token appeared in both the label list and the area list, was forbidden
@@ -147,7 +150,25 @@ def find_candidate_pairs(refs: list[TokenRef]) -> list[CandidatePair]:
                     distance=round(best[2], 1), label_text=label.text,
                 )
             )
-    return sorted(pairs, key=lambda p: p.label.id)
+
+    return sorted(_resolve_contention(pairs), key=lambda p: p.label.id)
+
+
+def _resolve_contention(pairs: list[CandidatePair]) -> list[CandidatePair]:
+    """Keep at most one pair per area token: the closest label wins.
+
+    A combined token owns its own area outright and never contends.
+    """
+    winner: dict[int, CandidatePair] = {}
+    kept: list[CandidatePair] = []
+    for pair in pairs:
+        if pair.combined:
+            kept.append(pair)
+            continue
+        current = winner.get(pair.area.id)
+        if current is None or pair.distance < current.distance:
+            winner[pair.area.id] = pair
+    return kept + list(winner.values())
 
 
 def format_token_list(refs: list[TokenRef]) -> str:

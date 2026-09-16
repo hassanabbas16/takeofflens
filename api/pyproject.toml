@@ -12,6 +12,9 @@ select = ["E", "F", "I", "UP", "B", "ANN", "BLE", "RUF"]
 # The Anthropic SDK does not export its response types, so Any is the honest annotation.
 "app/llm.py" = ["ANN401"]
 "app/batch.py" = ["ANN401"]
+# Depends()/Query() in argument defaults is the documented FastAPI idiom, not the mutable
+# default argument B008 is meant to catch.
+"app/routes/*.py" = ["B008"]
 "tests/test_parse_dims.py" = ["RUF001"]
 "tests/*" = ["ANN"]
 "alembic/*" = ["ANN", "E501"]
