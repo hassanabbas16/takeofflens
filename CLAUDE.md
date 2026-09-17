@@ -104,11 +104,12 @@ Everything below is measured or checked, not recalled.
 | — Batch API wired and verified | done | `f593a61` |
 | 4 — API routes, background processing, export | done | `000d3b0` |
 | 5 — Next.js upload + viewer | done | `79db7dc` |
-| 6 — eval tiers 1/2/4 | not started (Tier 3 50-plan run done, `701d5aa`) | |
+| 6 — eval tiers 1/2/4 | 6d built, awaiting hand-labelling | `35a90a5` |
 | 7 — README write-up | partly written as we go | |
 | 8 — detector | not started, do not start | |
 
-258 tests, ruff clean (`api/`). `docker compose up` works; the full stack was verified
+271 tests, ruff clean (`api/` **and** `eval/`; CI lints both). `WATCHPACK_POLLING=true`
+makes web hot reload work through the bind mount. `docker compose up` works; the full stack was verified
 live against the real containers: upload -> poll -> viewer -> CSV/JSON export, with the
 overlay checked against a rendered page (all 77 token boxes and the room boxes land on
 their glyphs).
@@ -137,9 +138,12 @@ shipped code.
 | Approach | Labels | Halluc | $/page | Total |
 | --- | --- | --- | --- | --- |
 | `rules` | 246/495 | 0 | $0 | $0 |
-| `ocr+llm` | 234/495 | 39 | $0.00299 | $0.1496 |
+| `ocr+llm` | 234/495 | 2 | $0.00299 | $0.1496 |
 | **`vlm`** | **292/495** | **0** | $0.00368 | $0.1841 |
-| `hybrid` | 289/495 | 57 | $0.00415 | $0.2076 |
+| `hybrid` | 289/495 | 10 | $0.00415 | $0.2076 |
+
+Hallucination counts are **post-fix**. They originally read 39 and 57; 37 and 47 of those
+were a scoring bug, not fabrication - see below.
 
 **What this run does and does not measure.** Label recall is against automatic Tier 2
 ground truth and covers all 50 plans - that number is real. Hallucination counts and cost
@@ -165,8 +169,8 @@ latency is not meaningful. The n=6 synchronous numbers are the ones to quote for
 1. **OCR is the dominant area-recall leak, not logic.** The funnel (`eval/funnel.py`, free)
    ends at 20/29 areas read and 16/29 paired. The 9 unread digits and 3 unread labels on
    1191 are OCR misses with no downstream fix.
-2. **Area accuracy has no usable ground truth beyond n=6.** This is now the single biggest
-   gap in the eval and the reason Tier 4 is the next priority.
+2. **Area accuracy still has no measured number.** Tier 4 is built and selected but not yet
+   labelled; nothing may be quoted until `eval/ground_truth/gold/` is populated.
 3. **`--max-spend` cannot interrupt a batch mid-flight**, because a batch is billed as a
    whole. It is enforced as a pre-submission projection instead. Understood, not a bug, but
    worth knowing: an underestimate would not be caught mid-run.
@@ -174,11 +178,13 @@ latency is not meaningful. The n=6 synchronous numbers are the ones to quote for
    pixels saves only 24%, because output tokens dominate. `eval/resolution_sweep.py` can
    test whether recall survives smaller images, but has not been run (it costs money and the
    cost case does not justify it).
-5. **`eval/*.py` is not ruff-clean** (18 pre-existing ANN001/RUF100 findings). The project
-   lints `api/` only. Not introduced by recent work; worth a sweep before the write-up.
-6. **Hot reload does not work for `web/` on Windows + Docker Desktop.** The Next dev
-   server's watcher does not see host edits through the bind mount. Run
-   `docker compose restart web` after editing. Noted in the README.
+5. **OCR mangles the `m²` superscript into LaTeX-like noise** - `3,3 m^{2}$`, `15.5 m^2}$`,
+   `$12,3 m^{}$`. 120 such tokens across the 50-plan sample, 29 of 50 plans affected. The
+   parser cannot read any of them, which is now the largest single source of lost area
+   recall in `rules`. A targeted normalisation step before parsing is the obvious next win
+   and is free to try.
+6. **OCR reads some rotated labels reversed** - `OH` comes back as `HO`. Part of why label
+   recall sits near 50%.
 
 ### Fixed this session
 
@@ -195,14 +201,39 @@ latency is not meaningful. The n=6 synchronous numbers are the ones to quote for
   and the `--max-spend` cap would have measured a later call against a zero baseline.
   Commit `701d5aa`.
 
+### Fixed in the most recent session
+
+- **Hallucinations were mostly a scoring bug.** Classifying all 96 from the 50-plan run
+  (replayed free from the retained batch results) found 37 of ocr+llm's 39 and 47 of
+  hybrid's 57 were the model reading an area *correctly* out of a token OCR had damaged.
+  Grounding required a match against an area the **parser** had classified, so succeeding
+  where the parser failed counted as fabrication. An area is now grounded if it matches a
+  parsed area, a decimal in the OCR text, or an integer with a damaged area unit; bare
+  integers are still refused. Counts: 39 -> 2 and 57 -> 10. Commit `8a8c4ee`.
+  - Why n=6 showed 0: not a scale effect. The 6 validation plans hold 5 garbled decimal
+    tokens between them and **none is an area** - they are elevation marks the parser
+    rightly rejects - so the model never had the chance to out-read the parser. The 50-plan
+    sample averages 2.40 garbled tokens per plan across 29 of 50 plans. The validation set
+    was unrepresentatively clean.
+  - The 10 remaining hybrid cases are real inventions: plan 7809 (three), 3984, 5886, 9270.
+- **`eval/` is linted** and CI exists (`.github/workflows/ci.yml`): ruff over `api/` and
+  `eval/`, pytest in the api image, npm ci + typecheck + build for web. 41 findings fixed.
+  `web/package-lock.json` was never generated; it is now, and the Dockerfile uses `npm ci`.
+  Commit `f276d49`.
+- **Hot reload works** via `WATCHPACK_POLLING=true`. Commit `572fbe4`.
+- **Tier 4 is built**: selection, labelling CLI and a free area scorer. Commit `35a90a5`.
+
 ### Next steps, in order
 
-1. **Phase 6d/6b — Tier 4 gold set and Tier 2 ground truth.** This is the priority: area
-   accuracy is the project's headline metric and currently has n=6. Both are free apart
-   from the hand-labelling.
-2. Phase 6a — Tier 1 OCR sweep over the full splits. Free.
-3. Phase 6e — `run_eval.py` + `results.md` once the gold set exists.
-4. Phase 7 — README write-up.
+1. **Hand-label the 15 gold plans**, then run `eval/tier4_area_accuracy.py`. Instructions in
+   `eval/README.md`. Free. This is the blocking step for the project's headline metric.
+2. Phase 6b — Tier 2 ground truth over the dataset. Free.
+3. Phase 6a — Tier 1 OCR sweep over the full splits. Free.
+4. Phase 6e — `run_eval.py` + `results.md` once the gold set exists.
+5. Phase 7 — README write-up.
+
+Consider before 6e: normalising the garbled `m²` superscript before parsing (open issue 5).
+It is free, and it is currently the biggest lever on `rules` area recall.
 
 
 ## Repo structure
