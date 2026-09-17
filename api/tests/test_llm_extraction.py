@@ -758,12 +758,32 @@ def _garbled_refs(text):
         ("6,7 m^{2}$", 6.7),
         ("15.5 m^2}$", 15.5),
         ("9,5m^2}$", 9.5),
-        ("OH. 16.0 n?", 16.0),   # "m²" misread as "n?"
-        ("OLOH. 17.6m", 17.6),   # area printed with a length unit
+    ],
+)
+def test_a_repaired_area_unit_grounds_strictly(text, area):
+    """normalise_area_unit repairs the mangled superscript, so the parser now reads these.
+
+    They ground on the strict path and raise no soft note at all - the rescue below is no
+    longer needed for them. Kept as a regression: if the repair stops working, these fall
+    back to the soft path and this test says so.
+    """
+    extraction = PlanExtraction(rooms=[room(ids=(0, 1), area=area)], notes=None)
+    result = check_grounding(extraction, _garbled_refs(text), hard=True)
+    assert result.hallucination_count == 0
+    assert not any(i.kind == "area_from_unparsed_token" for i in result.issues)
+    assert len(result.rooms) == 1
+
+
+@pytest.mark.parametrize(
+    ("text", "area"),
+    [
+        ("OH. 16.0 n?", 16.0),   # "m²" misread as "n?" - not superscript debris
+        ("OLOH. 17.6m", 17.6),   # area printed with what looks like a length unit
         ("MH18,4m", 18.4),       # no space between label and number
     ],
 )
-def test_area_read_from_a_garbled_token_is_not_a_hallucination(text, area):
+def test_area_read_from_a_still_unparseable_token_is_not_a_hallucination(text, area):
+    """Corruptions the repair deliberately does not touch, rescued by grounding instead."""
     extraction = PlanExtraction(rooms=[room(ids=(0, 1), area=area)], notes=None)
     result = check_grounding(extraction, _garbled_refs(text), hard=True)
     assert result.hallucination_count == 0

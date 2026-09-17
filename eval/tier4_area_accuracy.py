@@ -7,15 +7,25 @@ the gold plans were drawn from the 50-plan Tier 3 sample: their results are alre
 Reports, per approach, over the gold plans only:
 
 precision
-    of the areas an approach reported, how many are actually printed on the drawing.
-    This is the number that catches fabrication.
+    of the (room, area) pairs an approach reported, how many are right on both counts.
 
 recall
-    of the areas actually printed, how many the approach found.
+    of the areas actually printed, how many the approach attached to the right room.
 
-The two are reported separately and never averaged into one figure, because they fail in
+misattributed
+    the area is genuinely printed on the page, but the approach put it against the wrong
+    room. Reported in its own column, and never folded into precision or into the
+    hallucination counts: reading the page correctly and then assigning the value wrongly is
+    a different defect from inventing a number, and it points at the bbox pairing rather
+    than at the extractor.
+
+A prediction counts as correct only when **room and area both match**. An area alone is not
+a takeoff - a tool that reports the right number against the wrong room produces a quantity
+survey that does not add up.
+
+Precision and recall are reported separately and never averaged, because they fail in
 opposite directions: `rules` is conservative and `vlm` is liberal, and a single score would
-hide that. Matching is greedy within a relative tolerance and each gold area can be claimed
+hide that. Matching is greedy within a relative tolerance and each gold entry can be claimed
 once, so reporting the same area five times cannot inflate recall.
 
 Plans whose gold file is incomplete are skipped and named, so a partial labelling session
@@ -44,6 +54,7 @@ from app.pipeline.extract import (
 )
 from app.pipeline.ocr import OcrToken
 from app.pipeline.pairing import TokenRef
+from app.pipeline.room_types import label_key
 from app.schemas import PlanExtraction, Source
 
 GOLD_DIR = Path("/eval/ground_truth/gold")
@@ -80,20 +91,24 @@ def load_tokens(plan_id: str) -> list[OcrToken] | None:
     ]
 
 
-def gold_areas(plan_id: str) -> list[float] | None:
-    """The areas the drawing prints, per the human. None if not finished."""
+def gold_areas(plan_id: str) -> list[tuple[str, float]] | None:
+    """(label, printed area) pairs the human verified. None if the plan is not finished."""
     path = GOLD_DIR / f"{plan_id}.json"
     if not path.exists():
         return None
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not payload.get("complete"):
         return None
-    areas = [
-        r["area_m2"] for r in payload["rooms"]
+    pairs = [
+        (label_key(r.get("label") or r.get("svg_name") or ""), r["area_m2"])
+        for r in payload["rooms"]
         if r.get("decided") and r.get("area_m2") is not None
     ]
-    areas += [e["area_m2"] for e in payload.get("extra_areas", [])]
-    return areas
+    pairs += [
+        (label_key(e.get("label") or ""), e["area_m2"])
+        for e in payload.get("extra_areas", [])
+    ]
+    return pairs
 
 
 def find_raw(plan_id: str, approach: str) -> dict | None:
@@ -105,34 +120,88 @@ def find_raw(plan_id: str, approach: str) -> dict | None:
     return None
 
 
-def predicted_areas(plan_id: str, approach: str, tokens: list[OcrToken]) -> list[float] | None:
+def predicted_areas(
+    plan_id: str, approach: str, tokens: list[OcrToken]
+) -> list[tuple[str, float]] | None:
+    """(label, area) pairs an approach reported. Both halves matter - see match()."""
     refs = TokenRef.from_tokens(tokens)
     if approach == "rules":
         outcome = extract_rules(tokens)
-        return [r.area_m2 for r in outcome.rooms if r.area_m2 is not None]
-    entry = find_raw(plan_id, approach)
-    if entry is None:
-        return None
-    try:
-        extraction = PlanExtraction.model_validate(json.loads(entry["text"]))
-    except Exception:  # noqa: BLE001 - a malformed body means no prediction, not a crash
-        return None
-    grounded = GROUND[approach](extraction, refs)
-    outcome = ExtractionOutcome(SOURCE[approach], grounded, None, refs)
-    return [r.area_m2 for r in outcome.rooms if r.area_m2 is not None]
+    else:
+        entry = find_raw(plan_id, approach)
+        if entry is None:
+            return None
+        try:
+            extraction = PlanExtraction.model_validate(json.loads(entry["text"]))
+        except Exception:  # noqa: BLE001 - a malformed body means no prediction, not a crash
+            return None
+        grounded = GROUND[approach](extraction, refs)
+        outcome = ExtractionOutcome(SOURCE[approach], grounded, None, refs)
+    return [
+        (label_key(r.label_raw or ""), r.area_m2)
+        for r in outcome.rooms
+        if r.area_m2 is not None
+    ]
 
 
-def match(predicted: list[float], gold: list[float], tolerance: float) -> int:
-    """Greedy one-to-one match. Each gold area can be claimed once."""
+def _close(a: float, b: float, tolerance: float) -> bool:
+    return abs(a - b) <= tolerance * max(abs(b), 1e-6)
+
+
+def match(
+    predicted: list[tuple[str, float]],
+    gold: list[tuple[str, float]],
+    tolerance: float,
+) -> tuple[int, int, int]:
+    """Match on room *and* area together. Returns (correct, misattributed, spurious).
+
+    An area alone is not a takeoff. "11.7 appears somewhere on this page" is worth much less
+    than "the bedroom is 11.7", and a tool that reports the right number against the wrong
+    room produces a quantity survey that does not add up. So a prediction is only *correct*
+    when the label matches too.
+
+    A prediction whose area is genuinely printed on the page but sits under a different room
+    is **misattributed**. That is a distinct failure from a hallucination and is reported in
+    its own column: the model read the page correctly and then assigned the value wrongly,
+    which points at the bbox pairing rather than at the extractor inventing things.
+
+    Two passes so a label-correct match is never stolen by a label-wrong one: every exact
+    (label, area) pair is claimed first, and only the leftovers are tested for
+    misattribution. Each gold entry can be claimed once, so repeating an area cannot inflate
+    the score. Duplicate labels (three MH rooms) match within the label, which is the most
+    that is knowable - nothing distinguishes one MH from another here.
+    """
     remaining = list(gold)
-    hits = 0
-    for value in predicted:
-        for i, target in enumerate(remaining):
-            if abs(value - target) <= tolerance * max(abs(target), 1e-6):
-                hits += 1
+
+    # Pass 1: claim every prediction that is right on both counts. Gold entries are consumed
+    # here and only here, so five copies of one area cannot score five times - recall stays
+    # honest. Doing this before anything else stops a label-wrong prediction listed earlier
+    # from stealing the gold entry that a label-correct one deserves.
+    correct = 0
+    leftover: list[tuple[str, float]] = []
+    for label, value in predicted:
+        for i, (gold_label, gold_value) in enumerate(remaining):
+            if label == gold_label and _close(value, gold_value, tolerance):
+                correct += 1
                 remaining.pop(i)
                 break
-    return hits
+        else:
+            leftover.append((label, value))
+
+    # Pass 2: classify what is left against the *whole* gold set, claimed or not. The
+    # question here is about the prediction, not about a gold slot: "is this a real area put
+    # against the wrong room?" is true whether or not some other room already claimed it.
+    misattributed = 0
+    spurious = 0
+    for label, value in leftover:
+        printed_here = [g_label for g_label, g_value in gold if _close(value, g_value, tolerance)]
+        if printed_here and label not in printed_here:
+            misattributed += 1
+        else:
+            # Either the area is printed nowhere, or it is a duplicate claim on a room that
+            # was already matched. Both are unsupported extra claims.
+            spurious += 1
+    return correct, misattributed, spurious
 
 
 def main() -> int:
@@ -155,8 +224,11 @@ def main() -> int:
         print("  docker compose run --rm --no-deps api python /eval/label_helper.py")
         return 1
 
-    totals = {a: {"pred": 0, "gold": 0, "hit": 0, "plans": 0} for a in APPROACHES}
-    per_plan: dict[str, dict[str, tuple[int, int, int]]] = {}
+    totals = {
+        a: {"pred": 0, "gold": 0, "hit": 0, "mis": 0, "spur": 0, "plans": 0}
+        for a in APPROACHES
+    }
+    per_plan: dict[str, dict[str, tuple[int, int, int, int, int]]] = {}
     missing: list[str] = []
 
     for plan_id in ready:
@@ -171,9 +243,11 @@ def main() -> int:
             if predicted is None:
                 missing.append(f"{plan_id}/{approach}: no cached result")
                 continue
-            hits = match(predicted, gold, args.tolerance)
-            per_plan[plan_id][approach] = (hits, len(predicted), len(gold))
+            hits, mis, spur = match(predicted, gold, args.tolerance)
+            per_plan[plan_id][approach] = (hits, mis, spur, len(predicted), len(gold))
             totals[approach]["hit"] += hits
+            totals[approach]["mis"] += mis
+            totals[approach]["spur"] += spur
             totals[approach]["pred"] += len(predicted)
             totals[approach]["gold"] += len(gold)
             totals[approach]["plans"] += 1
@@ -192,34 +266,45 @@ def main() -> int:
             f"> {len(not_ready)} of {len(plan_ids)} gold plans are not finished and are "
             f"excluded: {', '.join(not_ready)}\n"
         )
-    lines.append("| Approach | Precision | Recall | Found | Reported | Printed |")
-    lines.append("| --- | --- | --- | --- | --- | --- |")
+    lines.append(
+        "A prediction is **correct** only when the room label and the area both match. "
+        "An area that is genuinely printed on the page but attached to the wrong room "
+        "is **misattributed** and counted in its own column - the page was read "
+        "correctly and the assignment was wrong, which is a different defect from "
+        "inventing a number, and different again from a grounding failure (those are "
+        "in `tier3_sample50.md`).\n"
+    )
+    lines.append(
+        "| Approach | Precision | Recall | Correct | Misattributed | Spurious | "
+        "Reported | Printed |"
+    )
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
     for approach in APPROACHES:
         t = totals[approach]
         if not t["plans"]:
-            lines.append(f"| `{approach}` | no cached results | | | | |")
+            lines.append(f"| `{approach}` | no cached results | | | | | | |")
             continue
         precision = t["hit"] / t["pred"] if t["pred"] else 0.0
         recall = t["hit"] / t["gold"] if t["gold"] else 0.0
         lines.append(
             f"| `{approach}` | {precision:.0%} | {recall:.0%} | {t['hit']} | "
-            f"{t['pred']} | {t['gold']} |"
+            f"{t['mis']} | {t['spur']} | {t['pred']} | {t['gold']} |"
         )
     lines.append("")
-    lines.append("## Per plan (found / reported, printed)")
+    lines.append("## Per plan - correct (+misattributed) / reported")
     lines.append("")
     lines.append("| Plan | Printed | " + " | ".join(f"`{a}`" for a in APPROACHES) + " |")
     lines.append("| --- | --- | " + " | ".join("---" for _ in APPROACHES) + " |")
     for plan_id in sorted(per_plan, key=int):
         row = per_plan[plan_id]
-        printed = next(iter(row.values()))[2] if row else 0
+        printed = next(iter(row.values()))[4] if row else 0
         cells = []
         for approach in APPROACHES:
             if approach not in row:
                 cells.append("-")
                 continue
-            hits, pred, _ = row[approach]
-            cells.append(f"{hits}/{pred}")
+            hits, mis, _spur, pred, _gold = row[approach]
+            cells.append(f"{hits}/{pred}" + (f" (+{mis} mis)" if mis else ""))
         lines.append(f"| {plan_id} | {printed} | " + " | ".join(cells) + " |")
     lines.append("")
     if missing:
@@ -231,8 +316,8 @@ def main() -> int:
     args.out.write_text("\n".join(lines), encoding="utf-8")
 
     print(f"gold plans scored: {n} (of {len(plan_ids)} in the list)")
-    print(f"\n{'approach':<10} {'precision':>10} {'recall':>8} {'found':>7} "
-          f"{'reported':>9} {'printed':>8}")
+    print(f"\n{'approach':<10} {'prec':>6} {'recall':>7} {'correct':>8} "
+          f"{'misattr':>8} {'spurious':>9} {'reported':>9} {'printed':>8}")
     for approach in APPROACHES:
         t = totals[approach]
         if not t["plans"]:
@@ -240,8 +325,8 @@ def main() -> int:
             continue
         precision = t["hit"] / t["pred"] if t["pred"] else 0.0
         recall = t["hit"] / t["gold"] if t["gold"] else 0.0
-        print(f"{approach:<10} {precision:>9.0%} {recall:>8.0%} {t['hit']:>7} "
-              f"{t['pred']:>9} {t['gold']:>8}")
+        print(f"{approach:<10} {precision:>5.0%} {recall:>7.0%} {t['hit']:>8} "
+              f"{t['mis']:>8} {t['spur']:>9} {t['pred']:>9} {t['gold']:>8}")
     if not_ready:
         print(f"\nnot finished, excluded: {', '.join(not_ready)}")
     print(f"\nwrote {args.out}")

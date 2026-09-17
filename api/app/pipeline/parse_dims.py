@@ -45,7 +45,7 @@ is deliberate and is unit-tested both ways.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 from app.pipeline.room_types import (
@@ -147,6 +147,44 @@ _CLEAN_RE = re.compile(r"\s+")
 
 def _clean(text: str) -> str:
     return _CLEAN_RE.sub(" ", text.strip())
+
+
+# --- OCR area-unit repair --------------------------------------------------------------
+#
+# The recogniser in use renders the superscript in "m²" as LaTeX-like markup, and does it
+# constantly: 120 tokens across the 50-plan Tier 3 sample, on 29 of those 50 plans. Real
+# reads, all of them areas a human sees perfectly well:
+#
+#     "3,3 m^{2}$"   "6,7 m^{2}$"   "15.5 m^2}$"   "$12,3 m^{}$"
+#     "11,5m^{2"     "2,3 m{2"      "36.0M^{2}$"   "9,5m^2}$"     "6.89$"
+#
+# The parser could read none of them, which made this the largest single source of lost area
+# recall - larger than any logic error. Repairing the unit before matching is a
+# recogniser-specific fix, so it lives in one named function rather than being smeared
+# through the patterns, and the untouched text is still what gets reported as ``raw``.
+#
+# Deliberately NOT repaired: a bare trailing "m" with no superscript debris ("17.6m"). That
+# could be a length, and inferring an area from it is a guess rather than a repair. Measured
+# separately - see eval/normalisation_sweep.py - it buys little and risks turning a real
+# length into an area.
+
+# "$" is LaTeX math delimiting and never appears on these drawings.
+_MATH_DELIM_RE = re.compile(r"\$")
+
+# An "m" followed by superscript debris: any of ^ { } around an optional 2.
+# Requires at least one of ^ { } so a bare "m" is left alone.
+_AREA_UNIT_NOISE_RE = re.compile(r"(?i)m\s*(?=[\^{}])[\^{}\s]*([2²])?[\^{}\s]*")
+
+
+def normalise_area_unit(text: str) -> str:
+    """Repair an OCR-mangled ``m²`` so the area patterns can match it.
+
+    Returns the text unchanged when there is nothing to repair, so callers can cheaply tell
+    whether the token needed help.
+    """
+    repaired = _MATH_DELIM_RE.sub("", text)
+    repaired = _AREA_UNIT_NOISE_RE.sub("m2", repaired)
+    return _CLEAN_RE.sub(" ", repaired.strip())
 
 
 # --- rejection patterns ---------------------------------------------------------------
@@ -307,13 +345,29 @@ def parse(text: str) -> ParseResult:
     """Classify a single OCR token.
 
     Never raises: malformed input returns ``UNKNOWN`` with a reason.
+
+    Matching runs against the area-unit-repaired text (see ``normalise_area_unit``), but the
+    result reports the **original** token: what OCR actually produced is what a reader needs
+    to see in the viewer and in a failure case. A repaired token carries a warning saying so,
+    so a value that only parsed because of the repair is never mistaken for a clean read.
     """
     if text is None:
         return _unknown("", "empty token")
-    raw = _clean(text)
-    if not raw:
-        return _unknown(raw, "empty token")
+    original = _clean(text)
+    if not original:
+        return _unknown(original, "empty token")
+    repaired = normalise_area_unit(original)
+    result = _parse_token(repaired or original)
+    if repaired == original:
+        return result
+    return replace(
+        result,
+        raw=original,
+        warnings=(*result.warnings, f"area unit repaired: {original!r} -> {repaired!r}"),
+    )
 
+
+def _parse_token(raw: str) -> ParseResult:
     # --- explicit rejections, checked before anything numeric ---
     if _SCALE_RE.match(raw):
         return _unknown(raw, "drawing scale label", fmt="scale")

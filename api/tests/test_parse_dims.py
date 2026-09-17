@@ -304,3 +304,63 @@ def test_pattern_score_prefers_real_readings_over_mirrored_garbage():
 def test_pattern_score_zero_for_nonsense():
     assert pattern_score("GISS") == 0.0
     assert pattern_score("") == 0.0
+
+
+# --- OCR area-unit repair ----------------------------------------------------------------
+#
+# Every string here is a real read from the 50-plan Tier 3 run. The recogniser renders the
+# superscript in "m2" as LaTeX-like markup on 29 of those 50 plans.
+
+
+@pytest.mark.parametrize(
+    ("text", "area"),
+    [
+        ("3,3 m^{2}$", 3.3),
+        ("6,7 m^{2}$", 6.7),
+        ("15.5 m^2}$", 15.5),
+        ("$12,3 m^{}$", 12.3),    # the 2 is lost entirely, only the braces survive
+        ("11,5m^{2", 11.5),       # truncated, no closing brace
+        ("2,3 m{2", 2.3),         # caret lost
+        ("36.0M^{2}$", 36.0),     # upper-case M
+        ("9,5m^2}$", 9.5),
+        ("6.89$", 6.89),          # only the math delimiter survived
+    ],
+)
+def test_mangled_area_unit_is_repaired_and_parsed(text, area):
+    result = parse(text)
+    assert result.kind is DimKind.AREA
+    assert result.area_m2 == pytest.approx(area)
+
+
+def test_a_repaired_token_reports_the_original_text_and_says_so():
+    """The viewer and failure cases must show what OCR produced, not a cleaned-up version."""
+    result = parse("3,3 m^{2}$")
+    assert result.raw == "3,3 m^{2}$"
+    assert any("area unit repaired" in w for w in result.warnings)
+
+
+def test_an_unrepaired_token_carries_no_repair_warning():
+    result = parse("MH 11.7")
+    assert result.raw == "MH 11.7"
+    assert not any("repaired" in w for w in result.warnings)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "17.6m",      # a bare trailing m could be a length; inferring an area is a guess
+        "9X21",       # door code
+        "+46.290",    # elevation
+        "1:100",      # scale
+        "19940",      # millimetre wall run
+    ],
+)
+def test_repair_does_not_touch_things_that_are_not_areas(text):
+    assert parse(text).kind is not DimKind.AREA
+
+
+def test_repair_is_idempotent():
+    from app.pipeline.parse_dims import normalise_area_unit
+
+    once = normalise_area_unit("3,3 m^{2}$")
+    assert normalise_area_unit(once) == once == "3,3 m2"
