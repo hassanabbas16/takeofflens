@@ -3,10 +3,13 @@
 Blueprint analysis: upload an architectural floor plan, extract rooms, dimensions and areas
 with OCR + LLM, and review the results with bounding-box overlays.
 
-> **Status: Phase 5.** Pipeline, four extraction approaches, API routes, background
-> processing, export and the web viewer are working end to end. The full eval (Phase 6) is
-> next. This README is replaced with the full write-up in Phase 7. No accuracy numbers
-> appear here until they have actually been measured.
+> **Status: end to end and evaluated.** Pipeline, four extraction approaches, API,
+> background processing, export and the web viewer all work; the evaluation has been run and
+> its numbers are below. A local detector (Phase 8) is not started.
+>
+> **Every number in this README was measured by a script in `eval/`, and each one says what
+> it was measured against.** Where a metric has a known weakness, the weakness is stated next
+> to it rather than in a footnote. Nothing here is estimated or illustrative.
 
 ## Quick start
 
@@ -43,6 +46,48 @@ on the right.
 > dev server would never notice a host edit. `WATCHPACK_POLLING=true` is set on the `web`
 > service in `docker-compose.yml` to make it poll instead, and hot reload works normally.
 > If you ever see edits not taking effect, check that variable first.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph web["web · Next.js"]
+        UP["Upload<br/>drag and drop"]
+        VW["Viewer<br/>SVG bbox overlay"]
+    end
+
+    subgraph api["api · FastAPI"]
+        R["routes/plans.py"]
+        BG["BackgroundTask"]
+        subgraph pipe["pipeline"]
+            ING["ingest<br/>PDF→PNG @300dpi"]
+            PRE["preprocess<br/>toggleable, default off"]
+            OCR["ocr<br/>PaddleOCR, 4 orientations"]
+            PD["parse_dims<br/>typed result + reason"]
+            PR["pairing<br/>weighted bbox proximity"]
+            EX["extract<br/>rules · ocr+llm · vlm · hybrid"]
+            GR["grounding<br/>hard / soft"]
+        end
+    end
+
+    DB[("postgres<br/>plans · pages · ocr_tokens<br/>rooms · llm_calls")]
+    ST[["storage/<br/>Storage interface"]]
+    AN(["Anthropic<br/>Messages + Batches"])
+
+    UP -->|"POST /plans"| R
+    R --> BG --> ING --> PRE --> OCR --> PD --> PR --> EX --> GR --> DB
+    ING --> ST
+    EX <-->|"structured outputs"| AN
+    VW -->|"GET /plans/:id"| R
+    R <--> DB
+    VW -->|"page image"| ST
+    R -->|"CSV / JSON"| VW
+```
+
+Processing runs as a FastAPI `BackgroundTask`. That is the right size for a demo and the
+wrong size for production — see [Scaling](#scaling-what-would-change). Page images go through
+a `Storage` interface rather than direct filesystem calls, so S3 is a swap rather than a
+rewrite.
 
 ## Data findings
 
@@ -370,6 +415,138 @@ Three real bugs, each found by the funnel rather than by guessing:
 The remaining losses are upstream OCR, not logic: 9 areas whose digits OCR never read, and 3
 on plan 1191 whose *labels* OCR never read, so there is nothing to pair with. Both are OCR
 recall problems and are recorded as such rather than papered over.
+
+## Results
+
+All figures below come from a **50-plan random sample** of the 270 `high_quality_architectural`
+test plans (seed `20260917`, reproducible). Total spend on the whole evaluation: **$0.54**.
+
+### Room labels - automatic ground truth, all 50 plans
+
+Reference is the Finnish name label in `model.svg`, 495 labels.
+
+| Approach | Labels found | Grounding failures | $/page | Total |
+| --- | --- | --- | --- | --- |
+| `rules` (free baseline) | 246/495 | 0 | $0 | $0 |
+| `ocr+llm` | 234/495 | 2 | $0.00299 | $0.1496 |
+| **`vlm`** | **292/495** | **0** | $0.00368 | $0.1841 |
+| `hybrid` | 289/495 | 10 | $0.00415 | $0.2076 |
+
+**`ocr+llm` scores below the free baseline.** Handing a text model a flat token list and
+asking it to assemble rooms is worse than doing it with geometry and a regex - and it costs
+money. That held at n=6 and again at n=50.
+
+`vlm` and `hybrid` both clearly beat free. `vlm` does it for less and, grounding softly by
+design, reports nothing it cannot see.
+
+### Areas - automatic ground truth, 691 annotated rooms
+
+Matched on **room and area together**; an area on the wrong room is not a hit. Full method and
+its limitations: [eval/README.md](eval/README.md).
+
+| Approach | Correct @5% | Correct @10% | Wrong value @5% | Misattributed @5% | Hallucinated @5% | Reported |
+| --- | --- | --- | --- | --- | --- | --- |
+| `rules` | 43 | 69 | 66 | 51 | 20 | 180 |
+| `ocr+llm` | 39 | 64 | 60 | 50 | 20 | 169 |
+| `vlm` | 37 | 66 | 46 | 75 | 25 | 183 |
+| **`hybrid`** | **52** | **85** | 63 | 65 | 23 | 203 |
+
+> **Read these as comparative, not absolute.** Ground truth is the annotation *polygon*, not
+> the figure printed on the drawing. The polygon follows the inner wall face; the printed
+> figure does not. Measured over 145 label-matched pairs the extracted value sits a median
+> **+4.4%** from its polygon, and only **30%** land within 5% - so at 5% this metric scores
+> many correct readings as wrong. Both tolerances are reported for that reason, and a 5-plan
+> hand-labelled set exists solely to quantify the gap.
+
+`hybrid` leads on areas; `vlm` leads on labels and has by far the worst misattribution count,
+which is consistent with a model that reads the page well and assigns values by eye.
+
+### What the evaluation actually caught
+
+The numbers above are less interesting than the defects that surfaced while producing them:
+
+- **A scoring bug that made the LLM approaches look like they fabricated data.** The
+  hallucination counts were 39 and 57 before a fix, and 2 and 10 after. Grounding demanded a
+  match against an area *the regex parser* had classified, so a model that correctly read an
+  area out of a token OCR had damaged was scored as inventing it. 37 of 39 and 47 of 57 were
+  that artifact. The parser and the checker answer different questions: "is this token an
+  area?" and "did the model invent this number?"
+- **The largest source of lost area recall was not logic but OCR markup.** The recogniser
+  renders the superscript in `m2` as LaTeX-like noise - `3,3 m^{2}$`, `$12,3 m^{}$`,
+  `2,3 m{2` - on 29 of 50 plans. Repairing it moved `rules` from 161 to 188 areas and
+  *corrected two already-wrong values* on the plan checked by eye.
+- **A metric that could not see its own pipeline improving.** The area column was gated on a
+  hand-verified file covering 2 of 50 plans, so real gains were arithmetically forced to zero.
+  It now carries a regression check that fails loudly if the metric stops tracking a
+  known-good change.
+- **The free baseline being served from a stale cache**, reporting pre-change numbers while
+  the shipped code produced new ones. Caching a free deterministic computation buys nothing.
+
+## Known limitations
+
+Ordered by how much they would matter to someone relying on this.
+
+1. **Area ground truth is an annotation polygon, not the printed figure.** Median +4.4%
+   disagreement, only 30% of pairs within 5%. Comparative between approaches; not an absolute
+   accuracy figure. The 5-plan gold set quantifies it; it is not yet labelled.
+2. **Label recall tops out near 59%** (`vlm`, 292/495). The dominant cause is OCR, not
+   extraction: rotated labels come back reversed (`OH` -> `HO`), and `model.svg` annotates
+   rooms the drawing never labels at all.
+3. **Recall against 691 annotated rooms is a floor, not a target.** Many of those rooms have
+   no area printed anywhere on the page, so no approach could reach 100% by reading correctly.
+4. **`width_m` and `length_m` are almost always null**, and that is correct - these plans
+   print a single area under the room label. They are never derived from an area.
+5. **`colorful` and `high_quality` are excluded from every LLM run.** The former has no text
+   on the page at all; the latter has labels but essentially no areas. Paying to run them
+   would buy nothing.
+6. **Two plans in six print no per-room areas at all.** Extraction quality is bounded by what
+   the draughtsman chose to print.
+7. **`rules` still accepts one bare-integer area per plan or so** when the page carries a
+   corroborated area elsewhere (plan 416: `K 7.0`, truth 11.6).
+8. **Latency is unmeasured for the paid approaches at n=50.** They ran through the Batch API,
+   where per-request latency is not meaningful. The synchronous n=6 figures were 8.5-12.1 s.
+9. **Single-sheet assumption in the viewer.** Multi-page PDFs render per page, but a plan
+   sheet containing two floors is treated as one page.
+
+## Scaling: what would change
+
+Each row names what exists now and what would replace it, not a wish list.
+
+| Now | At scale | Why |
+| --- | --- | --- |
+| `BackgroundTask` in the API process | Celery or RQ on Redis; the API only enqueues | A restart currently loses in-flight jobs, and OCR competes with request handling for CPU. `pipeline/run.py` is already a pure function of its inputs, so this is a worker wrapper, not a rewrite. |
+| Local `storage/` volume behind `Storage` | S3 through the same interface, presigned URLs for the viewer | The interface exists precisely so this is a swap. Page images are the bulk of the data and the API should not proxy them. |
+| PaddleOCR on CPU, tens of seconds per page | GPU inference, batched pages | OCR dominates wall-clock by an order of magnitude over everything else, including the API calls. |
+| Synchronous Messages API per page | Message Batches API | Already implemented and used for the evaluation: **50% of standard rates**, minutes of latency instead of seconds. Right for sweeps, wrong for interactive upload - both paths exist. |
+| One row per room, no dedup | Content-addressed page hashes | The same plan uploaded twice is OCR'd and paid for twice. |
+| Postgres for everything | Unchanged | Nothing here outgrows it before OCR and LLM costs dominate. |
+
+The honest next lever is none of these: it is **OCR quality**. The evaluation attributes more
+lost recall to OCR misreads than to every downstream logic error combined, and the `m2` unit
+repair - a small, targeted change - was worth more than any prompt change tried.
+
+## Demo
+
+To record the GIF:
+
+1. Start the stack and wait for both services:
+   ```bash
+   docker compose up -d
+   curl -s localhost:8000/health   # then open http://localhost:3000
+   ```
+2. Pick a plan that prints areas - `high_quality_architectural/1191` is a good one (15 printed
+   areas, clean decimals) - and copy its `F1_scaled.png` somewhere droppable.
+3. Record at **1280x800**, which keeps the viewer's two-column layout intact:
+   - drag the PNG onto the upload page
+   - let the status poll run (tens of seconds on CPU; do not cut this, it is honest)
+   - on the viewer: hover two or three table rows to show the bbox highlight
+   - toggle **OCR boxes** on, then off
+   - click **Export CSV**
+4. Keep it under ~15 s and 5 MB. `ffmpeg` produces a smaller file than most recorders:
+   ```bash
+   ffmpeg -i demo.mov -vf "fps=12,scale=960:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse" -loop 0 docs/demo.gif
+   ```
+5. Save to `docs/demo.gif` and reference it from the top of this README.
 
 ## API
 
