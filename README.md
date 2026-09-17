@@ -13,6 +13,10 @@ with OCR + LLM, and review the results with bounding-box overlays.
 > weakness, the weakness is stated next to it rather than in a footnote. Nothing here is
 > estimated or illustrative.
 
+<img src="docs/demo.gif" width="900" alt="Uploading a floor plan to TakeoffLens: the page is OCR'd, rooms and areas appear in a table beside the plan, OCR token boxes can be toggled on, hovering a row highlights that room on the drawing, the rules/VLM/hybrid extractions can be compared, and the result exports to CSV." />
+
+*Real run, no mock-ups. The OCR wait is time-compressed — see [Demo](#demo).*
+
 ## Quick start
 
 ```bash
@@ -530,26 +534,38 @@ repair - a small, targeted change - was worth more than any prompt change tried.
 
 ## Demo
 
-To record the GIF:
+The GIF at the top is produced by two committed scripts, so it can be regenerated whenever
+the UI changes rather than re-recorded by hand:
 
-1. Start the stack and wait for both services:
-   ```bash
-   docker compose up -d
-   curl -s localhost:8000/health   # then open http://localhost:3000
-   ```
-2. Pick a plan that prints areas - `high_quality_architectural/1191` is a good one (15 printed
-   areas, clean decimals) - and copy its `F1_scaled.png` somewhere droppable.
-3. Record at **1280x800**, which keeps the viewer's two-column layout intact:
-   - drag the PNG onto the upload page
-   - let the status poll run (tens of seconds on CPU; do not cut this, it is honest)
-   - on the viewer: hover two or three table rows to show the bbox highlight
-   - toggle **OCR boxes** on, then off
-   - click **Export CSV**
-4. Keep it under ~15 s and 5 MB. `ffmpeg` produces a smaller file than most recorders:
-   ```bash
-   ffmpeg -i demo.mov -vf "fps=12,scale=960:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse" -loop 0 docs/demo.gif
-   ```
-5. Save to `docs/demo.gif` and reference it from the top of this README.
+```bash
+docker compose up -d
+node docs/record_demo.mjs      # drives a real browser, writes docs/demo.raw.webm
+node docs/make_demo_gif.mjs    # renders and optimises docs/demo.gif
+```
+
+`record_demo.mjs` drives Playwright through the real app — upload page, upload, processing,
+viewer, OCR overlay, row hover, approach switch, CSV export — and records the browser to
+video. `make_demo_gif.mjs` converts it with the ffmpeg two-pass palette flow (a single-pass
+encode bands badly on flat UI) and then gifsicle, keeping whichever is smaller. It fails the
+build if the result exceeds 8 MB or 20 seconds.
+
+Two things about the recording are worth stating plainly, because both could otherwise
+mislead:
+
+- **The OCR wait is compressed, not cut.** OCR runs four orientations on CPU and takes
+  around half a minute, which cannot fit in a 20-second GIF. The wait is kept on screen —
+  spinner and status text included — and sped up 45x; every other phase plays at real speed.
+  The phase boundaries come from `docs/demo.phases.json`, written by the recorder, so the
+  compression is applied to exactly one segment rather than by eye.
+- **The `vlm` and `hybrid` rooms the approach toggle switches between are replayed from the
+  evaluation cache**, by `docs/seed_demo_sources.py`. The interactive upload path runs
+  `PIPELINE_APPROACHES`, which defaults to `rules` alone, so a live demo has one source and
+  nothing to compare; running the other two for the camera would cost money. The replayed
+  rooms are the real extraction output passed through the real grounding code — nothing is
+  fabricated, and no API call is made.
+
+Requires `ffmpeg` on PATH, plus `npm install playwright gifsicle` and
+`npx playwright install chromium`. gifsicle is optional: without it the ffmpeg GIF is used.
 
 ## API
 

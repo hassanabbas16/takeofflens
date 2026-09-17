@@ -1,0 +1,37 @@
+{
+  "planId": "11f53f52-5653-4335-a1a8-ec39c61194ed",
+  "phases": [
+    {
+      "name": "start",
+      "at": 0.692
+    },
+    {
+      "name": "upload-page",
+      "at": 2.76
+    },
+    {
+      "name": "uploaded",
+      "at": 2.977
+    },
+    {
+      "name": "viewer",
+      "at": 34.158
+    },
+    {
+      "name": "ocr-boxes-on",
+      "at": 36.489
+    },
+    {
+      "name": "hover-rooms",
+      "at": 41.241
+    },
+    {
+      "name": "approach-switch",
+      "at": 46.009
+    },
+    {
+      "name": "export",
+      "at": 47.91
+    }
+  ]
+}

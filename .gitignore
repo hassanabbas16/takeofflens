@@ -32,3 +32,10 @@ web/tsconfig.tsbuildinfo
 
 # Locally installed Claude Code skills are tooling, not project code.
 .claude/skills/
+
+# Demo recording intermediates; docs/demo.gif is the committed artefact.
+docs/demo.raw.webm
+docs/demo.trimmed.mp4
+docs/demo.palette.png
+docs/demo.failure.png
+docs/recordings/

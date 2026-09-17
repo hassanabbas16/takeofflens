@@ -41,6 +41,10 @@ services:
       # The key lives here and is read from the file, never from the environment.
       - ./.env:/app/.env:ro
       - ./eval:/eval
+      # Demo tooling runs inside this container rather than a second one: a second api
+      # container loading PaddleOCR against the shared model volume left the running
+      # container's OCR crashing natively on every orientation.
+      - ./docs:/docs:ro
       - takeoff_storage:/storage
       # Named volume for OCR weights. The image already carries them, so this only
       # persists anything a newer model pulls at runtime.
