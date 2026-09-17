@@ -103,98 +103,107 @@ Everything below is measured or checked, not recalled.
 | — provider switch to Claude, key lockdown, `rules` baseline | done | `020dcee`, `1ad295c` |
 | — Batch API wired and verified | done | `f593a61` |
 | 4 — API routes, background processing, export | done | `000d3b0` |
-| 5 — Next.js upload + viewer | **not started — next** | |
-| 6 — eval tiers 1/2/4 | not started (Tier 3 partly run) | |
+| 5 — Next.js upload + viewer | done | `79db7dc` |
+| 6 — eval tiers 1/2/4 | not started (Tier 3 50-plan run done, `701d5aa`) | |
 | 7 — README write-up | partly written as we go | |
 | 8 — detector | not started, do not start | |
 
-247 tests, ruff clean. `docker compose up` works; API verified live against the real
-container (upload -> poll -> page image -> CSV/JSON export).
+258 tests, ruff clean (`api/`). `docker compose up` works; the full stack was verified
+live against the real containers: upload -> poll -> viewer -> CSV/JSON export, with the
+overlay checked against a rendered page (all 77 token boxes and the room boxes land on
+their glyphs).
 
-### Spend to date: **$0.2699**
+### Spend to date: **$0.8112**
 
 | Run | Cost | Output |
 | --- | --- | --- |
 | 6-plan cost gate (pre-pairing-fix) | $0.1350 | `eval/results/tier3_cost_probe.md` |
 | 6-plan re-run (post-pairing-fix, apples-to-apples) | $0.1350 | `eval/results/tier3_validation6.md` |
+| **50-plan Tier 3 batch** | **$0.5413** | `eval/results/tier3_sample50.md` |
 
-Budget is a hard **$1.00** cap for all of Tier 3. **$0.73 remains.**
+Budget is a hard **$1.00** cap for all of Tier 3. **$0.1888 remains.**
 
-### 6-plan results (post-fix, `claude-haiku-4-5`, n=6)
+### The 50-plan Tier 3 run: DONE
 
-| Approach | Labels | Areas (printed) | Spurious | Halluc | Latency | $/page |
-| --- | --- | --- | --- | --- | --- | --- |
-| `rules` | 36/62 | 7/29 | 4 | 0 | 0.0s | $0 |
-| `ocr+llm` | 33/62 | 7/29 | 3 | 0 | 12.1s | $0.00607 |
-| `vlm` | 39/62 | 3/29 | 0 | 0 | 8.5s | $0.00758 |
-| **`hybrid`** | **41/62** | **9/29** | 3 | 0 | 10.1s | $0.00884 |
+150 requests (50 plans x 3 paid approaches) in one batch, 0 failures, $0.5413 actual
+against a $0.5623 projection. Key read from the project `.env`. Seed `20260917`, 50 of the
+270 `high_quality_architectural` test plans.
 
-The free `rules` baseline beats `ocr+llm` on labels and ties on areas. `hybrid` is the only
-approach clearly ahead of free on both.
+The pre-fix LLM cache was archived to `eval/cache/_archive/llm_prefix_20260917/` before the
+run, because the corroboration fix changes the `ocr+llm` and `hybrid` prompts and the cache
+is keyed by (plan, approach) with no prompt hash. All 50 plans therefore ran against
+shipped code.
 
-### The 50-plan Tier 3 run: NOT RUN
+| Approach | Labels | Halluc | $/page | Total |
+| --- | --- | --- | --- | --- |
+| `rules` | 246/495 | 0 | $0 | $0 |
+| `ocr+llm` | 234/495 | 39 | $0.00299 | $0.1496 |
+| **`vlm`** | **292/495** | **0** | $0.00368 | $0.1841 |
+| `hybrid` | 289/495 | 57 | $0.00415 | $0.2076 |
 
-It was started twice and never got to the API.
+**What this run does and does not measure.** Label recall is against automatic Tier 2
+ground truth and covers all 50 plans - that number is real. Hallucination counts and cost
+per page are real. **Area accuracy is not measurable here**: the denominator comes from
+`eval/ground_truth/printed_areas_6.json`, which covers 6 plans, only 2 of them in this
+sample. For the other 48 the printed-area count defaults to 0, meaning *not checked*, so
+the Areas and Spurious columns are not accuracy figures and must not be quoted as such.
+A real area number needs the Tier 4 gold set.
 
-1. First attempt was stopped deliberately: it had loaded the code *before* the pairing
-   fixes, so its results would not have matched the shipped code. No money had been spent.
-2. Second attempt was still in the OCR phase when the session ended.
+**Reading of the label result, n=50:** `vlm` leads at 292/495, `hybrid` is within noise of
+it at 289/495, and both clearly beat free `rules` at 246/495. `ocr+llm` at 234/495 is
+*below* the free baseline, which the n=6 table also showed - that finding held up. `vlm`
+also produces zero grounding failures by construction, while `hybrid` produces 57. On
+labels-per-dollar `vlm` is the better buy than `hybrid`; the n=6 table preferred `hybrid`
+on areas, but that was an area comparison and areas are exactly what n=50 cannot settle.
+Do not declare a winner until Tier 4 exists.
 
-**No batch was ever submitted. No money was spent on it.** Confirmed: no
-`eval/results/tier3_sample50.*` exists, and no cached row carries `batch: true`.
-
-**State:** 35 of the 50 sampled plans are OCR-cached in `eval/cache/ocr/`. OCR is free and
-cached, so resuming re-does only the missing 15 (roughly 6 minutes of CPU).
-
-**To resume:**
-```bash
-docker compose run --rm --no-deps api python /eval/tier3_cost_probe.py   --sample 50 --batch --max-spend 0.73 --out /eval/results/tier3_sample50.md
-```
-- The sample is 50 of the 270 `high_quality_architectural` test plans, seed `20260917`
-  (`SAMPLE_SEED` in `eval/tier3_cost_probe.py`). Reproducible — do not change the seed.
-- `--max-spend 0.73` is what is left of the $1.00 cap. The batch total is projected before
-  submission and the run **refuses outright** if it would exceed the cap.
-- Projected: 150 requests (50 plans x 3 paid approaches), **~$0.56** at the Batch API's 50%
-  rate. `rules` is free and does not go to the API.
-- The batch takes minutes, not seconds. Run it in the background and watch for
-  `batch complete`.
-- Results are cached per (plan, approach), so a crash costs nothing to resume.
-
-Afterwards, for the write-up:
-```bash
-docker compose run --rm --no-deps api python /eval/failure_cases.py   --results /eval/results/tier3_sample50.json --top 5
-```
+Latency reads 0.0s for all paid approaches: the Batch API is asynchronous and per-request
+latency is not meaningful. The n=6 synchronous numbers are the ones to quote for latency.
 
 ### Open issues
 
-1. **Plan 2536 still reports 2 fabricated areas.** It prints no per-room areas at all, yet
-   `rules` returns `WC 16.0` and `ET 2.0` from stray OCR tokens. Down from 5 before the
-   one-area-per-room fix, but not zero. Both survivors are single-claim, so the contention
-   fix did its job; what remains is that a plausible-looking number near a label is accepted
-   with no evidence the number *is* an area. Possible direction: require corroboration (an
-   area unit, or a sibling room on the same page that also has an area) before accepting a
-   bare number on a plan with no other areas. Not yet attempted.
-2. **OCR is the dominant area-recall leak, not logic.** The funnel (`eval/funnel.py`, free)
+1. **OCR is the dominant area-recall leak, not logic.** The funnel (`eval/funnel.py`, free)
    ends at 20/29 areas read and 16/29 paired. The 9 unread digits and 3 unread labels on
    1191 are OCR misses with no downstream fix.
-3. **The 6-plan table is n=6.** Too small to choose an approach on. The 50-plan run exists
-   to settle that.
-4. **`--max-spend` cannot interrupt a batch mid-flight**, because a batch is billed as a
+2. **Area accuracy has no usable ground truth beyond n=6.** This is now the single biggest
+   gap in the eval and the reason Tier 4 is the next priority.
+3. **`--max-spend` cannot interrupt a batch mid-flight**, because a batch is billed as a
    whole. It is enforced as a pre-submission projection instead. Understood, not a bug, but
    worth knowing: an underestimate would not be caught mid-run.
-5. **Resolution reduction was measured and rejected** as a cost lever: a quarter of the
+4. **Resolution reduction was measured and rejected** as a cost lever: a quarter of the
    pixels saves only 24%, because output tokens dominate. `eval/resolution_sweep.py` can
    test whether recall survives smaller images, but has not been run (it costs money and the
    cost case does not justify it).
+5. **`eval/*.py` is not ruff-clean** (18 pre-existing ANN001/RUF100 findings). The project
+   lints `api/` only. Not introduced by recent work; worth a sweep before the write-up.
+6. **Hot reload does not work for `web/` on Windows + Docker Desktop.** The Next dev
+   server's watcher does not see host edits through the bind mount. Run
+   `docker compose restart web` after editing. Noted in the README.
+
+### Fixed this session
+
+- **Plan 2536's fabricated areas are gone**, and so are the other four on the
+  hand-verified set. A bare number with no decimal separator and no area unit is now only
+  offered as an area if the page carries at least one area that has one; and an area
+  overlapping the whole-apartment type code ("3H+KT+S 61,0 m2") is the unit total, not a
+  room's. Measured on the 6-plan set: fabrications 5 -> 0, with 1191 and 2207 unchanged at
+  4 and 15 pairs, so no recall was lost. Commit `5be09c0`.
+- **The Batch API rejected the first real submission** with a 400: `custom_id` must match
+  `^[a-zA-Z0-9_-]{1,64}$` and the key was `"1191|ocr+llm"`. Encoded via `safe_custom_id()`,
+  validated before submission. No money was spent on the rejected batch. Commit `ca25149`.
+- **Batch spend was not counted** in the run's own total, so a $0.54 run reported $0.0000
+  and the `--max-spend` cap would have measured a later call against a zero baseline.
+  Commit `701d5aa`.
 
 ### Next steps, in order
 
-1. Resume the 50-plan Tier 3 run (command above), then report the results table, 3-5 failure
-   cases per approach with plan ids, and actual spend.
-2. **Phase 5** — Next.js upload page and viewer. This is the next build phase and does not
-   depend on the eval run.
-3. Phases 6a/6b/6d — Tier 1 sweep, Tier 2 ground truth, Tier 4 gold set. All free except
-   the hand-labelling.
+1. **Phase 6d/6b — Tier 4 gold set and Tier 2 ground truth.** This is the priority: area
+   accuracy is the project's headline metric and currently has n=6. Both are free apart
+   from the hand-labelling.
+2. Phase 6a — Tier 1 OCR sweep over the full splits. Free.
+3. Phase 6e — `run_eval.py` + `results.md` once the gold set exists.
+4. Phase 7 — README write-up.
+
 
 ## Repo structure
 ```
