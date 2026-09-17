@@ -135,15 +135,21 @@ run, because the corroboration fix changes the `ocr+llm` and `hybrid` prompts an
 is keyed by (plan, approach) with no prompt hash. All 50 plans therefore ran against
 shipped code.
 
-| Approach | Labels | Halluc | $/page | Total |
-| --- | --- | --- | --- | --- |
-| `rules` | 246/495 | 0 | $0 | $0 |
-| `ocr+llm` | 234/495 | 2 | $0.00299 | $0.1496 |
-| **`vlm`** | **292/495** | **0** | $0.00368 | $0.1841 |
-| `hybrid` | 289/495 | 10 | $0.00415 | $0.2076 |
+| Approach | Labels | Areas reported | Halluc | $/page | Total |
+| --- | --- | --- | --- | --- | --- |
+| `rules` | 246/495 | 188 | 0 | $0 | $0 |
+| `ocr+llm` | 234/495 | 177 | 2 | $0.00299 | $0.1496 |
+| **`vlm`** | **292/495** | 184 | **0** | $0.00368 | $0.1841 |
+| `hybrid` | 289/495 | 210 | 10 | $0.00415 | $0.2076 |
 
-Hallucination counts are **post-fix**. They originally read 39 and 57; 37 and 47 of those
-were a scoring bug, not fabrication - see below.
+Two caveats that must travel with this table:
+
+- Hallucination counts are **post-fix**. They originally read 39 and 57; 37 and 47 of those
+  were a scoring bug, not fabrication.
+- **`rules` is post-repair, the three paid rows are pre-repair.** `rules` is recomputed
+  every run and includes the OCR `m²` repair; the paid rows are replayed from cache and were
+  produced against prompts built before it. A rules-vs-paid comparison on **areas** is not
+  like-for-like. Labels, cost and hallucinations are unaffected.
 
 **What this run does and does not measure.** Label recall is against automatic Tier 2
 ground truth and covers all 50 plans - that number is real. Hallucination counts and cost
@@ -178,13 +184,15 @@ latency is not meaningful. The n=6 synchronous numbers are the ones to quote for
    pixels saves only 24%, because output tokens dominate. `eval/resolution_sweep.py` can
    test whether recall survives smaller images, but has not been run (it costs money and the
    cost case does not justify it).
-5. **OCR mangles the `m²` superscript into LaTeX-like noise** - `3,3 m^{2}$`, `15.5 m^2}$`,
-   `$12,3 m^{}$`. 120 such tokens across the 50-plan sample, 29 of 50 plans affected. The
-   parser cannot read any of them, which is now the largest single source of lost area
-   recall in `rules`. A targeted normalisation step before parsing is the obvious next win
-   and is free to try.
-6. **OCR reads some rotated labels reversed** - `OH` comes back as `HO`. Part of why label
-   recall sits near 50%.
+5. **OCR reads some rotated labels reversed** - `OH` comes back as `HO`. Part of why label
+   recall sits near 50%, and why the labelling CLI falls back to listing unclaimed areas.
+6. **The SVG-referenced area columns are nearly insensitive to real change.** The `m²`
+   repair moved `rules` from 161 to 188 reported areas without moving either matched column.
+   Treat `eval/results/tier3_sample50.md` area columns as weak signal; Tier 4 is the
+   measurement.
+7. **`rules` still reports one bare-integer area per plan or so** where the page carries a
+   corroborated area elsewhere (plan 416: `K 7.0`, should be 11.6). The corroboration rule
+   permits bare integers once any trustworthy area exists on the page. Not yet addressed.
 
 ### Fixed this session
 
@@ -223,6 +231,30 @@ latency is not meaningful. The n=6 synchronous numbers are the ones to quote for
 - **Hot reload works** via `WATCHPACK_POLLING=true`. Commit `572fbe4`.
 - **Tier 4 is built**: selection, labelling CLI and a free area scorer. Commit `35a90a5`.
 
+### Also done, most recent session
+
+- **Tier 4 scoring matches room AND area.** A prediction is correct only when both match. An
+  area genuinely printed on the page but attached to the wrong room is **misattributed**, in
+  its own column, never folded into precision or into hallucinations - it points at the bbox
+  pairing rather than at the extractor. Two-pass matching so a label-correct prediction is
+  not robbed by a label-wrong one. 11 tests. Commit `47afa96`.
+- **The `m²` repair is in** (`normalise_area_unit`). Measured free over the 50 plans:
+  area-readable tokens 158 -> 200, `rules` areas 161 -> 188, rooms unchanged at 433,
+  fabrications unchanged at 0. Verified on plan 416, where it also **corrected two wrong
+  values** (VAR 3.0 -> 6.7, PH 1.0 -> 3.2), taking that plan from 3/6 to 8/9 correct. A bare
+  trailing `m` is deliberately not repaired: measured (`eval/results/normalisation_sweep.md`)
+  and rejected as a guess rather than a repair. Commit `47afa96`.
+- **The COCO boxes are verified aligned with `F1_original.png`** before any Phase 8 work:
+  60/60 declared sizes match, 2576/2576 boxes inside frame, wall-box ink 5.23x a shifted
+  control, room perimeter 1.89x its interior, renders eyeballed. train and val agree.
+  Commit `a626362`.
+  - **Phase 8 needs a conversion.** The annotations are in `F1_original.png` space; the
+    pipeline OCRs `F1_scaled.png`. The ratio spans 0.40x-5.05x between plans but x and y
+    agree to within 0.0030 *within* a plan, so it is one exact per-plan scalar from the two
+    file sizes - no fitting. Unlike the SVG, whose per-axis ratios disagree.
+  - Categories confirmed `['room', 'wall']` on all three splits; doors and windows still
+    have to be generated.
+
 ### Next steps, in order
 
 1. **Hand-label the 15 gold plans**, then run `eval/tier4_area_accuracy.py`. Instructions in
@@ -231,9 +263,6 @@ latency is not meaningful. The n=6 synchronous numbers are the ones to quote for
 3. Phase 6a — Tier 1 OCR sweep over the full splits. Free.
 4. Phase 6e — `run_eval.py` + `results.md` once the gold set exists.
 5. Phase 7 — README write-up.
-
-Consider before 6e: normalising the garbled `m²` superscript before parsing (open issue 5).
-It is free, and it is currently the biggest lever on `rules` area recall.
 
 
 ## Repo structure
