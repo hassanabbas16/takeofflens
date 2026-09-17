@@ -104,8 +104,8 @@ Everything below is measured or checked, not recalled.
 | — Batch API wired and verified | done | `f593a61` |
 | 4 — API routes, background processing, export | done | `000d3b0` |
 | 5 — Next.js upload + viewer | done | `79db7dc` |
-| 6 — eval tiers 1/2/4 | 6d built, awaiting hand-labelling | `35a90a5` |
-| 7 — README write-up | partly written as we go | |
+| 6 — eval, area metric on SVG polygons | done; 5-plan validation awaiting labelling | `ddd2714` |
+| 7 — README write-up | done | `74cceff` |
 | 8 — detector | not started, do not start | |
 
 271 tests, ruff clean (`api/` **and** `eval/`; CI lints both). `WATCHPACK_POLLING=true`
@@ -255,14 +255,68 @@ latency is not meaningful. The n=6 synchronous numbers are the ones to quote for
   - Categories confirmed `['room', 'wall']` on all three splits; doors and windows still
     have to be generated.
 
+### Area metric reworked — read this before touching the eval
+
+The primary area metric is now **`eval/tier2_area_accuracy.py`**: SVG polygon areas, all 50
+plans, 691 annotated rooms, from cache, $0. The 15-plan hand-labelling path is gone.
+
+**Why the old SVG-matched columns never moved.** Three causes were checked:
+
+1. **Column gating, the dominant one.** `Areas (printed)` was
+   `matched_areas if n_printed else 0`, and `n_printed` came from `printed_areas_6.json`,
+   which covers 2 of the 50 plans. Every other plan's improvement was forced to zero by
+   construction and landed in "spurious". SVG matching had responded all along: 73 -> 89.
+2. **Tolerance, real but secondary.** Correct readings sit +8% to +13% from their polygons.
+   A 5% band cannot contain that.
+3. **The scaled/original mismatch — not a cause.** SVG areas are m² from the shoelace at
+   100 units/m. A pixel mismatch cannot affect an m² comparison.
+
+The old area-only matcher also scored wrong answers as right (`K 7.0`, truth 11.6, matched an
+unrelated 6.8 m² room). `eval/area_scoring.py` pairs on room **and** area, and splits results
+four ways: correct / wrong_value / misattributed / hallucinated. Misattribution counts
+predictions and does not consume a gold room; only a correct match consumes.
+
+**The limitation, measured:** median offset **+4.4%**, only **30%** of label-matched pairs
+within 5%, 48% within 10% (n=145). So the report gives both tolerances, and carries a
+regression check on plan 416 — 0 -> 0 at 5%, 2 -> 6 at 10% for the known-good m² repair.
+**At 5% the metric cannot see a real improvement.** Quote the 10% row when discussing the
+pipeline; quote 5% only with the caveat attached.
+
+### Area results (automatic ground truth, 691 rooms)
+
+| Approach | Correct @5% | @10% | Wrong value | Misattributed | Hallucinated | Reported |
+| --- | --- | --- | --- | --- | --- | --- |
+| `rules` | 43 | 69 | 66 | 51 | 20 | 180 |
+| `ocr+llm` | 39 | 64 | 60 | 50 | 20 | 169 |
+| `vlm` | 37 | 66 | 46 | 75 | 25 | 183 |
+| **`hybrid`** | **52** | **85** | 63 | 65 | 23 | 203 |
+
+`hybrid` leads on areas; `vlm` leads on labels and has the worst misattribution count.
+Breakdown columns are the @5% figures.
+
+### The 5-plan gold set — its only job
+
+`eval/data/gold_5.txt`: **654, 1041, 1116, 1838, 3527** (5 to 28 rooms, mixed garbled and
+clean). It does **not** score approaches — n=5 could not support an accuracy claim and
+nothing in the repo makes one. It exists to run `eval/tier4_gold_validation.py`, which pairs
+each hand-read printed area with **its own room's** polygon and reports the share falling
+outside 5%. Not labelled yet.
+
+```bash
+docker compose run --rm --no-deps api python /eval/label_helper.py        # needs a TTY
+docker compose run --rm --no-deps api python /eval/tier4_gold_validation.py
+```
+
 ### Next steps, in order
 
-1. **Hand-label the 15 gold plans**, then run `eval/tier4_area_accuracy.py`. Instructions in
-   `eval/README.md`. Free. This is the blocking step for the project's headline metric.
-2. Phase 6b — Tier 2 ground truth over the dataset. Free.
-3. Phase 6a — Tier 1 OCR sweep over the full splits. Free.
-4. Phase 6e — `run_eval.py` + `results.md` once the gold set exists.
-5. Phase 7 — README write-up.
+1. **Label the 5 gold plans**, then run `eval/tier4_gold_validation.py`. Free. Turns the
+   polygon caveat into a measured number.
+2. **Phase 8 — the detector. Do not start until the user says so** (they are applying
+   first). COCO alignment is already verified; see above for the `F1_original` vs
+   `F1_scaled` conversion it will need.
+3. Optional, free, and probably the biggest remaining win: more OCR repair. The evaluation
+   attributes more lost recall to OCR misreads than to all downstream logic combined.
+4. Phase 6a — Tier 1 OCR sweep over the full splits. Free.
 
 
 ## Repo structure
