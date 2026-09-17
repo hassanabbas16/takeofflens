@@ -734,3 +734,83 @@ def test_duplicate_custom_ids_are_refused():
 
     with pytest.raises(ValueError, match="unique"):
         submit_and_wait(object(), [item("same"), item("same")])
+
+
+# --- grounding against garbled OCR -------------------------------------------------------
+#
+# All of these token strings are real reads from the 50-plan Tier 3 run. PaddleOCR renders
+# the superscript in "m²" as LaTeX-like noise, which the parser cannot read as an area.
+# Before this was handled, a model that read such a token *correctly* was scored as
+# hallucinating: 38 of ocr+llm's 39 failures and 47 of hybrid's 57.
+
+
+def _garbled_refs(text):
+    return [
+        TokenRef(id=0, text="MH", confidence=0.95, bbox=(100, 100, 130, 130)),
+        TokenRef(id=1, text=text, confidence=0.70, bbox=(100, 135, 140, 160)),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "area"),
+    [
+        ("3,3 m^{2}$", 3.3),
+        ("6,7 m^{2}$", 6.7),
+        ("15.5 m^2}$", 15.5),
+        ("9,5m^2}$", 9.5),
+        ("OH. 16.0 n?", 16.0),   # "m²" misread as "n?"
+        ("OLOH. 17.6m", 17.6),   # area printed with a length unit
+        ("MH18,4m", 18.4),       # no space between label and number
+    ],
+)
+def test_area_read_from_a_garbled_token_is_not_a_hallucination(text, area):
+    extraction = PlanExtraction(rooms=[room(ids=(0, 1), area=area)], notes=None)
+    result = check_grounding(extraction, _garbled_refs(text), hard=True)
+    assert result.hallucination_count == 0
+    assert any(i.kind == "area_from_unparsed_token" for i in result.issues)
+    # Still a real room: a soft note is not a verdict.
+    assert len(result.rooms) == 1
+    assert not result.dropped
+
+
+def test_area_absent_from_the_page_is_still_a_hallucination():
+    """The rescue must not become a blanket pass."""
+    extraction = PlanExtraction(rooms=[room(ids=(0, 1), area=42.0)], notes=None)
+    result = check_grounding(extraction, _garbled_refs("3,3 m^{2}$"), hard=True)
+    assert result.hallucination_count == 1
+    assert any(i.kind == "ungrounded_area" for i in result.issues)
+
+
+def test_a_bare_integer_in_a_door_code_does_not_ground_an_area():
+    """"9X21" contains 21. A model claiming 21 m2 has not transcribed an area."""
+    extraction = PlanExtraction(rooms=[room(ids=(0, 1), area=21.0)], notes=None)
+    result = check_grounding(extraction, refs(), hard=True)
+    assert result.hallucination_count == 1
+    assert any(i.kind == "ungrounded_area" for i in result.issues)
+
+
+def test_soft_note_does_not_mark_the_room_ungrounded():
+    extraction = PlanExtraction(rooms=[room(ids=(0, 1), area=3.3)], notes=None)
+    result = check_grounding(extraction, _garbled_refs("3,3 m^{2}$"), hard=True)
+    assert [r.label_raw for r in result.rooms] == ["MH"]
+    assert result.dropped == []
+
+
+@pytest.mark.parametrize(
+    ("text", "area"),
+    [
+        ("0LOH.28m2$", 28.0),   # "OLOH. 28 m2", integer area with a damaged unit
+        ("65 m^{2", 65.0),
+    ],
+)
+def test_integer_area_with_a_damaged_unit_is_transcribed_not_invented(text, area):
+    extraction = PlanExtraction(rooms=[room(ids=(0, 1), area=area)], notes=None)
+    result = check_grounding(extraction, _garbled_refs(text), hard=True)
+    assert result.hallucination_count == 0
+
+
+def test_a_bare_integer_with_no_unit_still_does_not_ground_an_area():
+    """"85m" could be a length. Only a unit corroborates an integer."""
+    extraction = PlanExtraction(rooms=[room(ids=(0, 1), area=85.0)], notes=None)
+    result = check_grounding(extraction, _garbled_refs("LH+K 85m"), hard=True)
+    assert result.hallucination_count == 1

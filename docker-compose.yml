@@ -59,6 +59,10 @@ services:
     build: ./web
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      # Host file edits reach the container through a bind mount, which does not deliver
+      # inotify events on Windows/macOS Docker. Without polling the Next dev server simply
+      # never notices a change and hot reload silently does nothing.
+      WATCHPACK_POLLING: "true"
     volumes:
       - ./web:/app
       - /app/node_modules

@@ -19,6 +19,8 @@ countable; ``drop=True`` removes them from the returned set as well.
 
 from __future__ import annotations
 
+import re
+
 from app.pipeline.pairing import TokenRef
 from app.pipeline.parse_dims import DimKind, parse
 from app.schemas import ExtractedRoom, GroundedExtraction, GroundingIssue, PlanExtraction
@@ -26,6 +28,22 @@ from app.schemas import ExtractedRoom, GroundedExtraction, GroundingIssue, PlanE
 # An area counts as grounded if it is within this relative tolerance of a parsed token
 # value. Not zero, because the model may reasonably normalise "11,7" to 11.7.
 AREA_MATCH_TOLERANCE = 0.02
+
+# A decimal number appearing literally in a token's text.
+#
+# Restricted to decimals on purpose. An area is printed as a decimal on these plans (the
+# same fact the pairing stage's corroboration rule rests on), so a decimal in the OCR text
+# is a number the model could have read. Bare integers are excluded because they are
+# overwhelmingly door codes, wall runs and room numbers - accepting those would let a model
+# pull "21" out of "9X21" and have it pass as an area.
+_DECIMAL_IN_TEXT = re.compile(r"\d+[.,]\d+")
+
+# An integer *with an area unit attached* is also a readable area - the same corroboration
+# rule the pairing stage uses. The unit itself is often damaged, because the superscript in
+# "m²" is what OCR mangles, so this matches "m" followed within a few characters by a "2" or
+# "²": "28m2$", "65 m^{2", "11,5m^{2". It deliberately does not match a bare "85m", which
+# could be a length.
+_INT_WITH_UNIT_IN_TEXT = re.compile(r"(\d+)\s*[mM]\s*[\^{\s]{0,3}[2²]")
 
 
 def _parsed_areas(refs: list[TokenRef]) -> list[float]:
@@ -37,6 +55,35 @@ def _parsed_areas(refs: list[TokenRef]) -> list[float]:
         # A dimension pair also justifies an area claim, since the pair implies one.
         elif result.kind is DimKind.DIMENSION_PAIR and result.area_m2 is not None:
             values.append(result.area_m2)
+    return values
+
+
+def _transcribed_numbers(refs: list[TokenRef]) -> list[float]:
+    """Decimals present in the raw OCR text, whatever the parser made of the token.
+
+    The parser and the model are being asked different questions. The parser has to decide
+    "is this token an area?" without help, and it correctly refuses tokens it cannot read.
+    The grounding check only has to decide "did the model invent this number?", and the
+    honest test for that is whether the number is on the page at all.
+
+    Holding the model to the parser's ceiling made it a hallucination to *succeed* where the
+    regex failed. On the 50-plan run, PaddleOCR renders the superscript in "m²" as LaTeX-like
+    noise - "3,3 m^{2}$", "6,7 m^{2}$", "15.5 m^2}$", "MH18,4m" - and the parser cannot read
+    any of them. The model reads them correctly. Every one of those was counted against it:
+    38 of ocr+llm's 39 failures and 47 of hybrid's 57.
+    """
+    values: list[float] = []
+    for ref in refs:
+        for match in _DECIMAL_IN_TEXT.finditer(ref.text):
+            try:
+                values.append(float(match.group(0).replace(",", ".")))
+            except ValueError:
+                continue
+        for match in _INT_WITH_UNIT_IN_TEXT.finditer(ref.text):
+            try:
+                values.append(float(match.group(1)))
+            except ValueError:
+                continue
     return values
 
 
@@ -60,6 +107,7 @@ def check_grounding(
     """
     valid_ids = {ref.id for ref in refs}
     available_areas = _parsed_areas(refs)
+    transcribed = _transcribed_numbers(refs)
 
     kept: list[ExtractedRoom] = []
     dropped: list[ExtractedRoom] = []
@@ -93,23 +141,45 @@ def check_grounding(
                     )
 
         if room.area_m2 is not None and not _area_is_supported(room.area_m2, available_areas):
-            room_issues.append(
-                GroundingIssue(
-                    room_index=index,
-                    label_raw=room.label_raw,
-                    kind="ungrounded_area",
-                    detail=(
-                        f"area {room.area_m2:g} m2 does not match any area parsed from an "
-                        "OCR token on this page"
-                    ),
-                    # In soft mode this is advisory: the model may have read an area OCR
-                    # missed, which is common on these plans.
-                    hard=hard,
+            if _area_is_supported(room.area_m2, transcribed):
+                # The number is on the page, in a token the parser could not read as an
+                # area. The model transcribed it rather than invented it, so this is not a
+                # hallucination - but it is still worth surfacing, because the extraction
+                # rests on a token the rule-based path cannot corroborate.
+                room_issues.append(
+                    GroundingIssue(
+                        room_index=index,
+                        label_raw=room.label_raw,
+                        kind="area_from_unparsed_token",
+                        detail=(
+                            f"area {room.area_m2:g} m2 appears in the OCR text but in a token "
+                            "the parser could not read as an area"
+                        ),
+                        hard=False,
+                    )
                 )
-            )
+            else:
+                room_issues.append(
+                    GroundingIssue(
+                        room_index=index,
+                        label_raw=room.label_raw,
+                        kind="ungrounded_area",
+                        detail=(
+                            f"area {room.area_m2:g} m2 does not match any area parsed from an "
+                            "OCR token on this page, and appears nowhere in the OCR text"
+                        ),
+                        # In soft mode this is advisory: the model may have read an area OCR
+                        # missed, which is common on these plans.
+                        hard=hard,
+                    )
+                )
 
         issues.extend(room_issues)
-        if hard and room_issues:
+        # Only a *hard* issue makes a room ungrounded. A soft one is a note about the
+        # evidence, not a verdict on the room - an area transcribed from a token the parser
+        # could not read is still a real reading, and marking it ungrounded would undo the
+        # distinction this check exists to draw.
+        if any(issue.hard for issue in room_issues):
             dropped.append(room)
             if not drop:
                 kept.append(room)
