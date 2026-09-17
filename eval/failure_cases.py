@@ -113,7 +113,7 @@ def main() -> int:
 
         lines.append("| Plan | Labels | Areas | What went wrong |")
         lines.append("| --- | --- | --- | --- |")
-        for (score, reason), row in worst:
+        for (_score, reason), row in worst:
             labels = (f"{row.get('labels', 0)}/{row.get('ref_labels', 0)}"
                       if row.get("ok") else "-")
             areas = (f"{row.get('areas_on_printing_plans', 0)}/{row.get('printed_areas', 0)}"

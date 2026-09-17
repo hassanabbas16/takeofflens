@@ -27,16 +27,17 @@ import time
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 sys.path.insert(0, "/app")
 
-from app.pipeline.ocr import OcrToken, deduplicate, iou, run_ocr  # noqa: E402
-from app.pipeline.parse_dims import DimKind, parse  # noqa: E402
-from app.pipeline.preprocess import PreprocessConfig, preprocess  # noqa: E402
-from app.pipeline.room_types import normalise_label  # noqa: E402
+from app.pipeline.ocr import OcrToken, deduplicate, iou, run_ocr
+from app.pipeline.parse_dims import DimKind, parse
+from app.pipeline.preprocess import PreprocessConfig, preprocess
+from app.pipeline.room_types import normalise_label
 
 sys.path.insert(0, str(Path(__file__).parent))
-from svg_ground_truth import parse_model_svg, plan_dir, read_split  # noqa: E402
+from svg_ground_truth import parse_model_svg, plan_dir, read_split
 
 AREA_TOLERANCE = 0.05
 
@@ -94,7 +95,7 @@ def count_areas(tokens: list[OcrToken], areas: list[float]) -> int:
     return matched
 
 
-def load_page(png: Path, pre: PreprocessConfig):
+def load_page(png: Path, pre: PreprocessConfig) -> np.ndarray:
     return preprocess(cv2.imread(str(png)), pre)
 
 

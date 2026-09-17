@@ -29,9 +29,9 @@ from pathlib import Path
 
 sys.path.insert(0, "/app")
 
-from app.pipeline.ocr import OcrToken  # noqa: E402
-from app.pipeline.pairing import TokenRef, find_candidate_pairs  # noqa: E402
-from app.pipeline.parse_dims import DimKind, parse  # noqa: E402
+from app.pipeline.ocr import OcrToken
+from app.pipeline.pairing import TokenRef, find_candidate_pairs
+from app.pipeline.parse_dims import DimKind, parse
 
 PRINTED = Path(__file__).parent / "ground_truth" / "printed_areas_6.json"
 OCR_CACHE = Path("/eval/cache/ocr")

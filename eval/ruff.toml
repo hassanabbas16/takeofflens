@@ -1,0 +1,21 @@
+# Lint settings for the eval harness.
+#
+# Self-contained rather than extending api/pyproject.toml, because the two directories are
+# mounted separately in the container (/app and /eval) and there is no shared parent there
+# for ruff to walk up to. Keep the rule selection in step with api/pyproject.toml; CI lints
+# both, so a drift shows up as a failure rather than silently.
+
+line-length = 100
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "ANN", "BLE", "RUF"]
+
+[lint.per-file-ignores]
+# These scripts run inside the api container and import from /app, which requires a
+# sys.path insert before the imports. The E402 that would normally flag those imports is
+# already suppressed by ruff's own allowance for sys.path manipulation, so no directive is
+# needed - but the annotations on SDK response objects are genuinely Any.
+"classify_hallucinations.py" = ["ANN401"]
+"rescore_from_raw.py" = ["ANN401"]
+"retrieve_batch.py" = ["ANN401"]

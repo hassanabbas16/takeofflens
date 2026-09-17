@@ -24,13 +24,14 @@ import time
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 sys.path.insert(0, "/app")
 
-from app.config import get_settings  # noqa: E402
-from app.llm import LlmClient, LlmError  # noqa: E402
-from app.batch import BatchItem, safe_custom_id, submit_and_wait  # noqa: E402
-from app.pipeline.extract import (  # noqa: E402
+from app.batch import BatchItem, safe_custom_id, submit_and_wait
+from app.config import Settings, get_settings
+from app.llm import LlmClient, LlmError
+from app.pipeline.extract import (
     ExtractionOutcome,
     build_hybrid_prompt,
     build_ocr_llm_prompt,
@@ -47,15 +48,15 @@ from app.pipeline.extract import (  # noqa: E402
     system_prompt,
     text_content,
 )
-from app.pipeline.pairing import TokenRef  # noqa: E402
-from app.schemas import Source  # noqa: E402
-from app.pipeline.ocr import OcrToken, run_ocr  # noqa: E402
-from app.pipeline.preprocess import PreprocessConfig, preprocess  # noqa: E402
-from app.pipeline.room_types import label_key  # noqa: E402
-from app.pricing import get_pricing  # noqa: E402
+from app.pipeline.ocr import OcrToken, run_ocr
+from app.pipeline.pairing import TokenRef
+from app.pipeline.preprocess import PreprocessConfig, preprocess
+from app.pipeline.room_types import label_key
+from app.pricing import get_pricing
+from app.schemas import GroundedExtraction, PlanExtraction, Source
 
 sys.path.insert(0, str(Path(__file__).parent))
-from svg_ground_truth import parse_model_svg, plan_dir, read_split  # noqa: E402
+from svg_ground_truth import parse_model_svg, plan_dir, read_split
 
 AREA_TOLERANCE = 0.05
 
@@ -114,7 +115,11 @@ def score(outcome: ExtractionOutcome, labels: set[str], areas: list[float]) -> t
 
 
 def build_batch_item(
-    approach: str, plan_id: str, tokens, image, settings
+    approach: str,
+    plan_id: str,
+    tokens: list[OcrToken],
+    image: np.ndarray | None,
+    settings: Settings,
 ) -> BatchItem:
     """One batch request for (plan, approach), using the same prompts as the sync path."""
     refs = TokenRef.from_tokens(tokens)
@@ -144,7 +149,9 @@ def build_batch_item(
     )
 
 
-def ground_for(approach: str, parsed, refs):
+def ground_for(
+    approach: str, parsed: PlanExtraction, refs: list[TokenRef]
+) -> GroundedExtraction:
     if approach == "ocr+llm":
         return ground_ocr_llm(parsed, refs)
     if approach == "vlm":

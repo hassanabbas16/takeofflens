@@ -27,11 +27,12 @@ from app.pipeline.extract import ExtractionOutcome, ground_hybrid, ground_ocr_ll
 from app.pipeline.ocr import OcrToken
 from app.pipeline.pairing import TokenRef
 from app.schemas import PlanExtraction
+
 from tier3_cost_probe import (
+    _SOURCE_FOR,
     CACHE_DIR,
     OCR_CACHE_DIR,
     PRINTED_AREAS_PATH,
-    _SOURCE_FOR,
     plan_dir,
     reference,
     score,

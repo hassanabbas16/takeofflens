@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    name: ruff (api + eval)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Pinned to the version in api/requirements.txt so CI and the container agree on
+      # which rules exist. A ruff upgrade that adds a rule should be a deliberate change,
+      # not a surprise red build.
+      - run: pip install ruff==0.8.6
+
+      # api/ and eval/ carry separate configs - they are mounted at different paths in the
+      # container and have no shared parent there - so both are named explicitly. Linting
+      # only api/ is how eval/ accumulated 18 findings unnoticed.
+      - name: Lint api/
+        run: ruff check api
+      - name: Lint eval/
+        run: ruff check eval
+
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The suite imports cv2 and paddleocr, so it runs in the real image rather than
+      # against a pip install on the runner. Layer caching keeps the rebuild off the
+      # critical path for changes that do not touch requirements.txt.
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the api image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./api
+          load: true
+          tags: takeofflens-api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # No database and no dataset mount: the suite is unit-level by design and must not
+      # need either. If a test ever does, that is a signal the test is in the wrong tier.
+      - name: Run tests
+        run: docker run --rm takeofflens-api:ci python -m pytest tests -q
+
+  web:
+    name: typecheck + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build

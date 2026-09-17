@@ -27,15 +27,15 @@ import cv2
 
 sys.path.insert(0, "/app")
 
-from app.config import get_settings  # noqa: E402
-from app.llm import LlmClient, LlmError  # noqa: E402
-from app.pipeline.extract import encode_page_image, extract_hybrid, extract_vlm  # noqa: E402
-from app.pipeline.ocr import OcrToken  # noqa: E402
-from app.pipeline.room_types import label_key  # noqa: E402
-from app.pricing import get_pricing  # noqa: E402
+from app.config import Settings, get_settings
+from app.llm import LlmClient, LlmError
+from app.pipeline.extract import encode_page_image, extract_hybrid, extract_vlm
+from app.pipeline.ocr import OcrToken
+from app.pipeline.room_types import label_key
+from app.pricing import PricingTable, get_pricing
 
 sys.path.insert(0, str(Path(__file__).parent))
-from svg_ground_truth import parse_model_svg, plan_dir, read_split  # noqa: E402
+from svg_ground_truth import parse_model_svg, plan_dir, read_split
 
 OCR_CACHE = Path("/eval/cache/ocr")
 
@@ -71,7 +71,13 @@ def _reference_labels(svg_path: Path) -> set[str]:
     return labels - {"", "UNDEFINED"}
 
 
-def _dry_run(args, settings, pricing, entries, model) -> int:
+def _dry_run(
+    args: argparse.Namespace,
+    settings: Settings,
+    pricing: PricingTable,
+    entries: list[str],
+    model: str,
+) -> int:
     print("DRY RUN - arithmetic only, no API calls\n")
     print(f"model {model}, {len(entries)} plans")
     print(f"{'long edge':>10} {'mean img tokens':>16} {'est $/page':>12} {'vs 1536':>9}")
