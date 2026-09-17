@@ -102,6 +102,7 @@ def main() -> int:
         old = (row.get("labels"), row.get("areas"), row.get("hallucinations"))
         row.update({
             "rooms": len(outcome.rooms),
+            "areas_reported": sum(1 for r in outcome.rooms if r.area_m2 is not None),
             "labels": matched_labels,
             "ref_labels": len(labels),
             "areas": matched_areas,

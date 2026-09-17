@@ -307,6 +307,9 @@ def main() -> int:
                 row = {
                     "plan": plan_id, "ok": True, "batch": True,
                     "rooms": len(scored.rooms),
+                    "areas_reported": sum(
+                        1 for r in scored.rooms if r.area_m2 is not None
+                    ),
                     "labels": matched_labels, "ref_labels": len(labels),
                     "areas": matched_areas, "printed_areas": n_printed,
                     "areas_on_printing_plans": matched_areas if n_printed else 0,
@@ -347,7 +350,11 @@ def main() -> int:
             if stop_reason:
                 break
             cache = CACHE_DIR / approach.replace("+", "_") / f"{plan_id}.json"
-            if cache.exists() and not args.force:
+            # `rules` is free and deterministic, so caching it buys nothing and costs
+            # correctness: its cached rows survived a parser change and kept reporting the
+            # old numbers while the shipped code produced new ones. Always recompute it. The
+            # paid approaches are cached precisely because re-running them is not free.
+            if approach != "rules" and cache.exists() and not args.force:
                 row = json.loads(cache.read_text(encoding="utf-8"))
                 # Backfill fields added after a cache entry was written, so an older cache
                 # does not silently report zeros.
@@ -419,6 +426,9 @@ def main() -> int:
             row = {
                 "plan": plan_id, "ok": True,
                 "rooms": len(outcome.rooms),
+                "areas_reported": sum(
+                    1 for r in outcome.rooms if r.area_m2 is not None
+                ),
                 "labels": matched_labels, "ref_labels": len(labels),
                 "areas": matched_areas, "printed_areas": n_printed,
                 # An area "matched" on a plan that prints none is a number that happened to
@@ -476,10 +486,31 @@ def main() -> int:
             "not the drawing prints them. Labels, hallucinations and cost are unaffected. "
             "A real area/dimension accuracy number needs the Tier 4 gold set.\n"
         )
+    # The rules row and the three paid rows are not on the same footing any more, and a
+    # table that does not say so invites exactly the wrong comparison.
+    lines.append(
+        "\n> **`rules` is post-repair; the three paid rows are pre-repair.** `rules` is free "
+        "and deterministic, so it is recomputed here and includes the OCR area-unit repair "
+        "(`normalise_area_unit`). The `ocr+llm`, `vlm` and `hybrid` outputs are replayed "
+        "from cache and were produced against prompts built **before** that repair existed; "
+        "re-running them would cost money and has not been done. Their label, cost and "
+        "hallucination figures are unaffected by the repair, but any `rules`-vs-paid "
+        "comparison on **areas** is not like-for-like. See `normalisation_sweep.md` for what "
+        "the repair changes.\n"
+    )
     lines.append("")
-    lines.append("| Approach | Labels | Areas (printed) | Spurious areas | Hallucinations | "
-                 "Mean latency | Mean cost/page | Total |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+    lines.append(
+        "**Areas reported** is the raw count of rooms an approach gave an area to, with no "
+        "ground truth involved. It is here because the two columns beside it are matched "
+        "against *SVG polygon* areas and can sit still while real output changes: the OCR "
+        "area-unit repair moved `rules` from 161 to 188 reported areas without moving either "
+        "matched column at all.\n"
+    )
+    lines.append(
+        "| Approach | Labels | Areas reported | Areas (printed) | Spurious areas | "
+        "Hallucinations | Mean latency | Mean cost/page | Total |"
+    )
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
 
     print("\n" + "=" * 78)
     print("SUMMARY")
@@ -487,10 +518,11 @@ def main() -> int:
     for approach in args.approaches:
         rows = [r for r in results[approach] if r.get("ok")]
         if not rows:
-            lines.append(f"| {approach} | all calls failed | | | | | | |")
+            lines.append(f"| {approach} | all calls failed | | | | | | | |")
             print(f"{approach}: all calls failed")
             continue
         labels = sum(r["labels"] for r in rows)
+        reported = sum(r.get("areas_reported", 0) for r in rows)
         areas = sum(r.get("areas_on_printing_plans", 0) for r in rows)
         spurious = sum(r.get("spurious_areas", 0) for r in rows)
         halluc = sum(r["hallucinations"] for r in rows)
@@ -501,11 +533,12 @@ def main() -> int:
         cost_cell = f"${mean_cost:.5f}" if mean_cost is not None else "unknown"
         total_cell = f"${total_cost:.4f}" if total_cost is not None else "unknown"
         lines.append(
-            f"| {approach} | {labels}/{ref_totals['labels']} | "
+            f"| {approach} | {labels}/{ref_totals['labels']} | {reported} | "
             f"{areas}/{ref_totals['areas_printed']} | {spurious} | {halluc} | "
             f"{latency / 1000:.1f}s | {cost_cell} | {total_cell} |"
         )
         print(f"{approach:<8} labels={labels}/{ref_totals['labels']} "
+              f"reported={reported} "
               f"areas={areas}/{ref_totals['areas_printed']} spurious={spurious} "
               f"halluc={halluc} latency={latency / 1000:.1f}s cost/page={cost_cell} "
               f"total={total_cell}")
