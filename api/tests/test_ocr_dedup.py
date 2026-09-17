@@ -432,3 +432,81 @@ def test_single_letter_plus_digit_is_not_a_room():
         OcrToken(text="H7", confidence=0.65, bbox=(100, 100, 130, 130), angle=0),
     ])
     assert outcome.rooms == []
+
+
+# --- area corroboration ----------------------------------------------------------------
+#
+# Real regressions from the 6-plan hand-verified set (eval/ground_truth/printed_areas_6.json),
+# where all 29 printed areas are decimals and four of the six plans print no area at all.
+
+
+def test_bare_integer_is_not_an_area_when_the_page_prints_no_real_one():
+    """Plan 2536: OCR shattered the apartment summary "4H K KH WC 90 M2" into fragments,
+    and "016" and "2" landed under WC and ET and were reported as 16.0 and 2.0 m2. The page
+    prints no areas at all, so nothing corroborates a bare integer."""
+    from app.pipeline.extract import extract_rules
+    from app.pipeline.ocr import OcrToken
+
+    outcome = extract_rules([
+        OcrToken(text="WC", confidence=0.84, bbox=(335, 654, 362, 701), angle=90),
+        OcrToken(text="016", confidence=0.78, bbox=(340, 719, 359, 759), angle=0),
+        OcrToken(text="ET", confidence=0.99, bbox=(334, 856, 362, 900), angle=270),
+        OcrToken(text="2", confidence=0.99, bbox=(350, 793, 372, 810), angle=270),
+    ])
+    assert {r.label_raw for r in outcome.rooms} == {"WC", "ET"}
+    assert all(r.area_m2 is None for r in outcome.rooms)
+
+
+def test_bare_integer_is_accepted_when_a_sibling_area_corroborates_it():
+    """The rule is corroboration, not a ban: a page that demonstrably prints areas as
+    decimals may also print an integer one, and that one is kept."""
+    from app.pipeline.extract import extract_rules
+    from app.pipeline.ocr import OcrToken
+
+    outcome = extract_rules([
+        OcrToken(text="MH", confidence=0.99, bbox=(100, 100, 130, 130), angle=0),
+        OcrToken(text="11.7", confidence=0.95, bbox=(100, 135, 150, 160), angle=0),
+        OcrToken(text="OH", confidence=0.99, bbox=(300, 100, 330, 130), angle=0),
+        OcrToken(text="24", confidence=0.95, bbox=(300, 135, 340, 160), angle=0),
+    ])
+    by_label = {r.label_raw: r.area_m2 for r in outcome.rooms}
+    assert by_label["MH"] == pytest.approx(11.7)
+    assert by_label["OH"] == pytest.approx(24.0)
+
+
+def test_decimal_areas_survive_the_corroboration_rule():
+    """Guard against over-correcting: the common printed form must be untouched."""
+    from app.pipeline.extract import extract_rules
+    from app.pipeline.ocr import OcrToken
+
+    outcome = extract_rules([
+        OcrToken(text="KHH", confidence=0.99, bbox=(100, 100, 140, 130), angle=0),
+        OcrToken(text="10.8", confidence=0.95, bbox=(100, 135, 150, 160), angle=0),
+    ])
+    assert [(r.label_raw, r.area_m2) for r in outcome.rooms] == [("KHH", pytest.approx(10.8))]
+
+
+def test_area_beside_the_apartment_type_code_is_not_a_room_area():
+    """Plan 2504: "3H+KT+S 61,0 m2" is the whole unit. OCR split the code from its area and
+    read it as "BH+KT+$", so the two are tied together geometrically, not lexically. The
+    61 m2 was being handed to the living room printed just below it."""
+    from app.pipeline.extract import extract_rules
+    from app.pipeline.ocr import OcrToken
+
+    outcome = extract_rules([
+        OcrToken(text="BH+KT+$", confidence=0.79, bbox=(434, 608, 489, 774), angle=0),
+        OcrToken(text="61,0m2", confidence=0.77, bbox=(396, 611, 441, 731), angle=0),
+        OcrToken(text="OH", confidence=0.99, bbox=(425, 876, 465, 932), angle=0),
+    ])
+    assert [r.area_m2 for r in outcome.rooms] == [None]
+
+
+def test_apartment_type_code_detection_tolerates_ocr_mangling():
+    from app.pipeline.parse_dims import looks_like_apartment_code
+
+    assert looks_like_apartment_code("3H+KT+S")
+    assert looks_like_apartment_code("2H+KK")
+    assert looks_like_apartment_code("BH+KT+$")     # 3 read as B, S as $
+    assert not looks_like_apartment_code("MH")
+    assert not looks_like_apartment_code("11.7")
+    assert not looks_like_apartment_code("OLESKELU+RUOK")  # compound room label, not a code

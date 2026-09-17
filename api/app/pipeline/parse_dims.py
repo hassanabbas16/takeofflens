@@ -61,6 +61,10 @@ from app.pipeline.room_types import (
 MIN_PLAUSIBLE_AREA_M2 = 1.0
 MAX_PLAUSIBLE_AREA_M2 = 500.0
 
+# Area formats carrying no corroborating evidence: no decimal separator, no area unit.
+# See ParseResult.area_needs_corroboration.
+_WEAK_AREA_FMTS = frozenset({"area_bare_integer", "label_area_integer"})
+
 # Door/window codes are decimetres. A 30 dm (3 m) leaf is already unusually large, so a
 # bare integer pair above this is not a door code.
 MAX_DOOR_CODE_DM = 30
@@ -97,6 +101,19 @@ class ParseResult:
     def is_dimension(self) -> bool:
         """True only for things that describe a room's size."""
         return self.kind in (DimKind.AREA, DimKind.DIMENSION_PAIR)
+
+    @property
+    def area_needs_corroboration(self) -> bool:
+        """True for an area read off a digit string with no decimal point and no unit.
+
+        Every one of the 29 areas on the hand-verified 6-plan set is printed as a decimal
+        ("MH 11.7"), and none as a bare integer. A bare integer that lands near a room
+        label is therefore far more likely to be a room number, a millimetre wall run, a
+        door code or an OCR fragment of the apartment summary than a real area. The value
+        is still returned and still tagged, so eval can report it; it is the *pairing*
+        stage that decides whether the page carries enough evidence to trust it.
+        """
+        return self.kind is DimKind.AREA and self.fmt in _WEAK_AREA_FMTS
 
 
 def _unknown(raw: str, reason: str, fmt: str = "") -> ParseResult:
@@ -143,6 +160,29 @@ _YEAR_RE = re.compile(r"^(?:19|20)\d{2}$")
 _APARTMENT_SUMMARY_RE = re.compile(
     rf"^\s*\d+\s*H\b.*?({_NUM})\s*{_AREA_UNIT}\s*$", re.IGNORECASE
 )
+
+# The Finnish apartment *type* code: "3H+K+S", "2H+KK", "3H+KT+S" - a room count, then
+# "+"-joined codes for kitchen/sauna. It labels the whole unit, and the area printed beside
+# it is the unit total, never a room's.
+#
+# Matched separately from _APARTMENT_SUMMARY_RE because OCR routinely splits the code away
+# from its area into different tokens, and mangles the characters either side: on plan 2504
+# "3H+KT+S" came back as "BH+KT+$" (3 read as B, S as $) with "61,0m2" as its own token.
+# The "+"-joined skeleton survives that mangling even when the individual letters do not, so
+# the leading and trailing characters are deliberately permissive - only the structure is
+# load-bearing.
+_APARTMENT_CODE_RE = re.compile(
+    r"[0-9A-Za-z]\s*H\s*\+\s*[A-Za-z$§]{1,3}(?:\s*\+\s*[A-Za-z$§]{1,3})*"
+)
+
+
+def looks_like_apartment_code(text: str) -> bool:
+    """True when a token carries the Finnish whole-apartment type code ("3H+KT+S").
+
+    Used by the pairing stage to suppress an area printed alongside it: that number is the
+    apartment total, not a room area.
+    """
+    return bool(_APARTMENT_CODE_RE.search(text))
 
 
 # --- pair patterns --------------------------------------------------------------------
@@ -305,9 +345,18 @@ def parse(text: str) -> ParseResult:
         label, number = label_area.group(1), label_area.group(2)
         resolved = resolve_label(label)
         if resolved is not None:
+            explicit_unit = bool(re.search(_AREA_UNIT, raw))
+            # "MH 11.7" is an area; "MH 1" is almost always a room *number* - this dataset
+            # numbers repeated rooms MH1/MH2, AH 1, AH 3. Tag the two apart so the pairing
+            # stage can demand corroboration for the integer form without losing the tag
+            # that per-format eval reporting needs.
+            fmt = (
+                "label_area"
+                if explicit_unit or _has_decimal(number)
+                else "label_area_integer"
+            )
             return _area_result(
-                _to_float(number), raw, "label_area", label=label,
-                explicit_unit=bool(re.search(_AREA_UNIT, raw)),
+                _to_float(number), raw, fmt, label=label, explicit_unit=explicit_unit,
             )
         return _unknown(
             raw,

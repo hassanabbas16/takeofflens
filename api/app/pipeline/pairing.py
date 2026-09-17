@@ -18,7 +18,7 @@ import math
 from dataclasses import dataclass
 
 from app.pipeline.ocr import BBox, OcrToken
-from app.pipeline.parse_dims import DimKind, parse
+from app.pipeline.parse_dims import DimKind, ParseResult, looks_like_apartment_code, parse
 from app.pipeline.room_types import is_known_label
 
 # Vertical distance is scaled by this before comparing, so a token directly below a label
@@ -80,6 +80,10 @@ def weighted_distance(a: BBox, b: BBox) -> float:
     return math.hypot(ax - bx, (ay - by) * VERTICAL_WEIGHT)
 
 
+def _overlaps(a: BBox, b: BBox) -> bool:
+    return not (a[2] < b[0] or b[2] < a[0] or a[3] < b[1] or b[3] < a[1])
+
+
 def _label_height(bbox: BBox) -> float:
     # Rotated labels have a tall box, so the "height" of the text is its shorter side.
     return max(1.0, float(min(bbox[2] - bbox[0], bbox[3] - bbox[1])))
@@ -99,17 +103,55 @@ def find_candidate_pairs(refs: list[TokenRef]) -> list[CandidatePair]:
     from matching itself, and so was paired with some other room's area - producing a
     confidently wrong pair rather than a missing one. Ten of the twenty-six tokens on one
     real plan were of this form.
+
+    An area also has to be *corroborated* to be offered at all: see the comment on
+    ``has_corroborated_area`` below. A page that prints no trustworthy area anywhere
+    offers no bare integers as areas, which is what stops stray digits on an area-less
+    plan from being reported as room areas.
     """
-    combined: list[CandidatePair] = []
-    combined_ids: set[int] = set()
-    for ref in refs:
-        result = parse(ref.text)
-        if (
+    parsed = {ref.id: parse(ref.text) for ref in refs}
+
+    # Does this page print any area we can actually trust - one with a decimal separator
+    # ("11.7") or an explicit unit ("55 m2")? If it does, a bare integer among them is
+    # plausibly just another area. If it does not, every bare integer on the page is
+    # something else: a room number, a millimetre wall run, or an OCR fragment of the
+    # apartment summary. Plan 2536 prints no areas at all, yet OCR shattered its summary
+    # string "4H K KH WC 90 M2" into fragments and two of them ("016", "2") landed near a
+    # label and were reported as WC 16.0 and ET 2.0. Requiring a corroborating sibling
+    # costs nothing on the hand-verified 6-plan set, where all 29 printed areas are
+    # decimals, and removes the fabrications on the four plans that print none.
+    has_corroborated_area = any(
+        r.kind is DimKind.AREA
+        and r.area_m2 is not None
+        and r.plausible
+        and not r.area_needs_corroboration
+        for r in parsed.values()
+    )
+
+    # An area printed alongside the whole-apartment type code ("3H+KT+S 61,0 m2") is the
+    # unit total, not a room's. OCR splits the code from its number into separate tokens, so
+    # the association has to be made geometrically: an area token overlapping the code token
+    # belongs to the summary. On plan 2504 this is what handed the living room the
+    # apartment's own 61 m2.
+    summary_boxes = [r.bbox for r in refs if looks_like_apartment_code(r.text)]
+
+    def in_summary_block(ref: TokenRef) -> bool:
+        return any(_overlaps(ref.bbox, box) for box in summary_boxes)
+
+    def area_is_trusted(result: ParseResult, ref: TokenRef) -> bool:
+        return (
             result.kind is DimKind.AREA
             and result.area_m2 is not None
             and result.plausible
-            and result.label
-        ):
+            and (has_corroborated_area or not result.area_needs_corroboration)
+            and not in_summary_block(ref)
+        )
+
+    combined: list[CandidatePair] = []
+    combined_ids: set[int] = set()
+    for ref in refs:
+        result = parsed[ref.id]
+        if area_is_trusted(result, ref) and result.label:
             combined.append(
                 CandidatePair(
                     label=ref, area=ref, area_m2=result.area_m2, distance=0.0,
@@ -120,15 +162,15 @@ def find_candidate_pairs(refs: list[TokenRef]) -> list[CandidatePair]:
 
     labels = [
         r for r in refs
-        if r.id not in combined_ids and (is_known_label(r.text) or parse(r.text).label)
+        if r.id not in combined_ids and (is_known_label(r.text) or parsed[r.id].label)
     ]
     areas: list[tuple[TokenRef, float]] = []
     for ref in refs:
         if ref.id in combined_ids:
             # Already spoken for: this token's area belongs to its own label.
             continue
-        result = parse(ref.text)
-        if result.kind is DimKind.AREA and result.area_m2 is not None and result.plausible:
+        result = parsed[ref.id]
+        if area_is_trusted(result, ref):
             areas.append((ref, result.area_m2))
 
     pairs: list[CandidatePair] = list(combined)
