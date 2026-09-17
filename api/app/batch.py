@@ -19,8 +19,10 @@ plan's rooms to another.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -35,6 +37,29 @@ logger = logging.getLogger(__name__)
 # How often to ask whether the batch has finished, and how long to wait before giving up.
 POLL_SECONDS = 15
 DEFAULT_TIMEOUT_SECONDS = 60 * 60
+
+# The Batch API accepts only these characters in a custom_id, and rejects the whole batch
+# with a 400 if any one id breaks the rule. Our natural key for a request is
+# (plan, approach), and "ocr+llm" contains a "+" - so the natural key is *not* a legal id
+# and has to be encoded. This bit the first real submission of a 150-request batch.
+CUSTOM_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+_CUSTOM_ID_MAX = 64
+
+
+def safe_custom_id(raw: str) -> str:
+    """Encode an arbitrary key as a legal custom_id, injectively.
+
+    Illegal characters become "_". That alone is not injective - "ocr+llm" and "ocr_llm"
+    would collide - so whenever the encoding changes the string or has to be truncated, a
+    short digest of the original is appended. Ids are only ever used to look a result back
+    up, never parsed apart, so an opaque suffix costs nothing and a collision would
+    silently attribute one plan's rooms to another.
+    """
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]", "_", raw)
+    if cleaned == raw and len(cleaned) <= _CUSTOM_ID_MAX:
+        return cleaned
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
+    return f"{cleaned[: _CUSTOM_ID_MAX - 9]}-{digest}"
 
 
 @dataclass
@@ -140,6 +165,22 @@ def submit_and_wait(
     """Submit one batch, wait for it, and return outcomes keyed by ``custom_id``."""
     if not items:
         return {}
+
+    # Fail here, with the offending id named, rather than letting the API reject all 150
+    # requests with a message that identifies only "requests.0".
+    illegal = [i.custom_id for i in items if not CUSTOM_ID_RE.match(i.custom_id)]
+    if illegal:
+        raise ValueError(
+            f"{len(illegal)} custom_id(s) are not accepted by the Batch API "
+            f"(must match {CUSTOM_ID_RE.pattern}); first: {illegal[0]!r}. "
+            "Build them with safe_custom_id()."
+        )
+    seen = {i.custom_id for i in items}
+    if len(seen) != len(items):
+        raise ValueError(
+            "custom_ids must be unique within a batch; results are matched by id and "
+            "duplicates would attribute one request's result to another"
+        )
 
     requests = [build_request(item, schema) for item in items]
     batch = client.messages.batches.create(requests=requests)

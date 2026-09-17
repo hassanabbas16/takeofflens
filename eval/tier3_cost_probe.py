@@ -29,7 +29,7 @@ sys.path.insert(0, "/app")
 
 from app.config import get_settings  # noqa: E402
 from app.llm import LlmClient, LlmError  # noqa: E402
-from app.batch import BatchItem, submit_and_wait  # noqa: E402
+from app.batch import BatchItem, safe_custom_id, submit_and_wait  # noqa: E402
 from app.pipeline.extract import (  # noqa: E402
     ExtractionOutcome,
     build_hybrid_prompt,
@@ -136,7 +136,7 @@ def build_batch_item(
             "content": [text_content(prompt), image_content(encoded)],
         }]
     return BatchItem(
-        custom_id=f"{plan_id}|{approach}",
+        custom_id=safe_custom_id(f"{plan_id}|{approach}"),
         model=model,
         system=system_prompt(),
         messages=messages,

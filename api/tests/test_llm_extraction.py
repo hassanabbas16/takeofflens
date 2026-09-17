@@ -668,3 +668,69 @@ def test_env_file_comments_and_blanks_ignored(tmp_path):
         encoding="utf-8",
     )
     assert read_env_file_value("ANTHROPIC_API_KEY", env_file) == "sk-ant-real"
+
+
+def test_custom_id_encodes_the_plus_in_ocr_llm():
+    """The Batch API rejects a whole batch over one bad custom_id, and "ocr+llm" has a "+".
+
+    A 150-request batch was rejected with a 400 naming only "requests.0" because the
+    natural key "1191|ocr+llm" is not a legal id.
+    """
+    from app.batch import CUSTOM_ID_RE, safe_custom_id
+
+    encoded = safe_custom_id("1191|ocr+llm")
+    assert CUSTOM_ID_RE.match(encoded), encoded
+
+
+def test_custom_id_encoding_does_not_collide():
+    """"ocr+llm" and "ocr_llm" both sanitise to the same string; they must not collide."""
+    from app.batch import safe_custom_id
+
+    assert safe_custom_id("1191|ocr+llm") != safe_custom_id("1191|ocr_llm")
+
+
+def test_custom_id_leaves_already_legal_ids_alone():
+    from app.batch import safe_custom_id
+
+    assert safe_custom_id("1191_rules") == "1191_rules"
+
+
+def test_custom_id_stays_within_the_length_limit():
+    from app.batch import CUSTOM_ID_RE, safe_custom_id
+
+    encoded = safe_custom_id("x" * 200)
+    assert len(encoded) <= 64
+    assert CUSTOM_ID_RE.match(encoded)
+
+
+def test_submitting_an_illegal_custom_id_fails_before_the_api_call():
+    """Fail locally, naming the id, rather than paying a round trip to be told "requests.0"."""
+    from app.batch import BatchItem, submit_and_wait
+
+    class Boom:
+        class messages:
+            class batches:
+                @staticmethod
+                def create(**_kwargs):
+                    raise AssertionError("must not reach the API")
+
+    item = BatchItem(
+        custom_id="1191|ocr+llm",
+        model="claude-haiku-4-5",
+        system=None,
+        messages=[],
+        max_tokens=1024,
+    )
+    with pytest.raises(ValueError, match="custom_id"):
+        submit_and_wait(Boom(), [item])
+
+
+def test_duplicate_custom_ids_are_refused():
+    """Results are matched by id, so duplicates would misattribute one plan's rooms."""
+    from app.batch import BatchItem, submit_and_wait
+
+    def item(custom_id):
+        return BatchItem(custom_id=custom_id, model="m", system=None, messages=[], max_tokens=8)
+
+    with pytest.raises(ValueError, match="unique"):
+        submit_and_wait(object(), [item("same"), item("same")])
