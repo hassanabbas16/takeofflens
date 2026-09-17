@@ -1,17 +1,19 @@
-"""Tier 4 step 2: the labelling CLI. Hand-verify what each drawing actually prints.
+"""Optional tool: read the areas a drawing prints, one room at a time.
 
-    docker compose run --rm --no-deps api python /eval/label_helper.py
+    docker compose run --rm --no-deps api python /eval/label_helper.py 1191 2207
     docker compose run --rm --no-deps api python /eval/label_helper.py --review 1041
 
-Why only 5 plans
-----------------
-The primary area metric is now the SVG polygon over all 50 plans
-(``eval/tier2_area_accuracy.py``). These 5 exist to **validate** that method: to measure how
-often the figure printed on the drawing falls outside 5% of the polygon area. That turns the
-polygon's known weakness from a caveat into a number.
+**Nothing in the evaluation depends on this.** Area accuracy is measured against the
+``model.svg`` polygons over all 50 sampled plans (``eval/tier2_area_accuracy.py``), which is
+free and needs no human. This script is kept because reading a handful of plans by hand is
+the fastest way to understand a disagreement between an approach and the polygons - it is a
+debugging aid, not a source of metrics.
 
-What is being labelled
-----------------------
+Plan ids are passed on the command line. Output lands in
+``eval/ground_truth/manual/<id>.json`` and is not read by any report.
+
+What it records
+---------------
 The **areas printed on the drawing**, with the label each is printed under. Not the SVG's
 polygon areas: ``model.svg`` is CubiCasa's annotation of the page, its own dimension labels
 are ``display:none`` and never rendered, and its polygon area follows the inner wall face
@@ -32,7 +34,7 @@ area - taken from the same bbox pairing the pipeline uses - and the OCR tokens n
 asks you to confirm, correct, or say the drawing prints no area there. Then it offers any
 remaining parseable area on the page that no room claimed, in case the SVG missed a room.
 
-Every answer is written to ``eval/ground_truth/gold/<id>.json`` immediately, so the work is
+Every answer is written to ``eval/ground_truth/manual/<id>.json`` immediately, so the work is
 resumable at any point: re-running continues at the first undecided room.
 
 Each field records how it was decided, so an area a human read off the drawing is
@@ -68,10 +70,9 @@ from app.pipeline.room_types import normalise_label
 
 from svg_ground_truth import parse_model_svg, plan_dir
 
-GOLD_DIR = Path("/eval/ground_truth/gold")
+OUT_DIR_JSON = Path("/eval/ground_truth/manual")
 LABELLING_DIR = Path("/eval/labelling")
 OCR_CACHE_DIR = Path("/eval/cache/ocr")
-GOLD_LIST = Path("/eval/data/gold_5.txt")
 
 # Mirrors the pairing stage: an area sits within a few label-heights of its label.
 MAX_LABEL_HEIGHTS = 6.0
@@ -91,16 +92,6 @@ HELP = """
   ?           show this help again
   q           save and quit
 """
-
-
-def read_gold_list(path: Path) -> list[str]:
-    ids = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        ids.append(line.split()[0])
-    return ids
 
 
 def load_tokens(plan_id: str) -> list[OcrToken]:
@@ -153,9 +144,9 @@ def readable_numbers(text: str) -> list[float]:
     """Every number a human could read as an area in this token, parser or not.
 
     A parsed area first; otherwise any decimal, or an integer carrying a damaged area unit.
-    The gold plans were chosen *because* OCR garbles their area text ("9,5m^2}$",
-    "OH. 16.0 n?"), so a suggestion engine that only used parser output would fall silent on
-    exactly the plans that need labelling most - which is what it did on the first run.
+    OCR garbles area text constantly on these plans ("9,5m^2}$", "OH. 16.0 n?"), so a
+    suggestion engine that only used parser output falls silent on exactly the plans worth
+    inspecting - which is what it did on the first run.
     """
     result = parse(text)
     # Where the parser has positively identified the token as something that is *not* an
@@ -244,22 +235,22 @@ def all_parseable_areas(tokens: list[OcrToken]) -> list[tuple[int, str, float]]:
     return found
 
 
-def load_gold(plan_id: str) -> dict:
-    path = GOLD_DIR / f"{plan_id}.json"
+def load_record(plan_id: str) -> dict:
+    path = OUT_DIR_JSON / f"{plan_id}.json"
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
     return {}
 
 
-def save_gold(plan_id: str, payload: dict) -> None:
-    GOLD_DIR.mkdir(parents=True, exist_ok=True)
+def save_record(plan_id: str, payload: dict) -> None:
+    OUT_DIR_JSON.mkdir(parents=True, exist_ok=True)
     payload["printed_area_count"] = sum(
         1 for r in payload["rooms"] if r.get("decided") and r.get("area_m2") is not None
     )
     payload["decided_count"] = sum(1 for r in payload["rooms"] if r.get("decided"))
     payload["complete"] = payload["decided_count"] == len(payload["rooms"])
     payload["updated_at"] = datetime.now(UTC).isoformat(timespec="seconds")
-    (GOLD_DIR / f"{plan_id}.json").write_text(
+    (OUT_DIR_JSON / f"{plan_id}.json").write_text(
         json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
@@ -280,13 +271,13 @@ def label_plan(plan_id: str, dataset: Path, review: bool = False) -> str:
     image_path = render(plan_id, directory / "F1_scaled.png", tokens)
     used: set[int] = set()
 
-    payload = load_gold(plan_id)
+    payload = load_record(plan_id)
     if not payload or review:
         existing = {r["svg_index"]: r for r in payload.get("rooms", [])}
         payload = {
             "plan_id": plan_id,
             "folder": "high_quality_architectural",
-            "method": "hand-verified from the rendered page",
+            "method": "read off the rendered page, one room at a time",
             "note": (
                 "Areas are what the DRAWING prints, not model.svg polygon areas. A null "
                 "area_m2 with decided=true means the drawing prints no area for that room."
@@ -306,7 +297,7 @@ def label_plan(plan_id: str, dataset: Path, review: bool = False) -> str:
                 "area_source": prior.get("area_source"),
                 "label_source": prior.get("label_source", "svg"),
             })
-        save_gold(plan_id, payload)
+        save_record(plan_id, payload)
 
     rooms = payload["rooms"]
     print("\n" + "=" * 78)
@@ -363,7 +354,7 @@ def label_plan(plan_id: str, dataset: Path, review: bool = False) -> str:
         answer = ask("  > ")
 
         if answer == "q":
-            save_gold(plan_id, payload)
+            save_record(plan_id, payload)
             return "quit"
         if answer == "?":
             print(HELP)
@@ -379,7 +370,7 @@ def label_plan(plan_id: str, dataset: Path, review: bool = False) -> str:
             if new_label:
                 room["label"] = new_label
                 room["label_source"] = "typed"
-                save_gold(plan_id, payload)
+                save_record(plan_id, payload)
             continue
         if answer == "n":
             room["area_m2"] = None
@@ -405,7 +396,7 @@ def label_plan(plan_id: str, dataset: Path, review: bool = False) -> str:
             room["area_source"] = "typed"
             room["decided"] = True
 
-        save_gold(plan_id, payload)
+        save_record(plan_id, payload)
         i += 1
 
     # Anything printed that no room claimed - the SVG does miss rooms.
@@ -422,7 +413,7 @@ def label_plan(plan_id: str, dataset: Path, review: bool = False) -> str:
         for idx, text, value in leftovers:
             reply = ask(f'  id{idx} "{text}" -> {value:g} m2   [y/N/q] ')
             if reply == "q":
-                save_gold(plan_id, payload)
+                save_record(plan_id, payload)
                 return "quit"
             if reply == "y":
                 label = ask("    label it is printed under (blank if none): ").strip()
@@ -432,7 +423,7 @@ def label_plan(plan_id: str, dataset: Path, review: bool = False) -> str:
                 })
         payload["extras_reviewed"] = True
 
-    save_gold(plan_id, payload)
+    save_record(plan_id, payload)
     printed = payload["printed_area_count"] + len(extras)
     print(f"\n  plan {plan_id} done: {printed} printed area(s) recorded")
     return "done"
@@ -440,18 +431,24 @@ def label_plan(plan_id: str, dataset: Path, review: bool = False) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("plans", nargs="*", help="plan ids to walk through")
     parser.add_argument("--dataset", type=Path, default=Path("/data/cubicasa5k"))
-    parser.add_argument("--list", type=Path, default=GOLD_LIST)
     parser.add_argument("--review", help="re-open a finished plan for correction")
     parser.add_argument("--status", action="store_true", help="show progress and exit")
     args = parser.parse_args()
 
-    plan_ids = [args.review] if args.review else read_gold_list(args.list)
+    plan_ids = [args.review] if args.review else args.plans
+    if not plan_ids and not args.status:
+        parser.error("give one or more plan ids, or --review <id>, or --status")
 
     if args.status:
         print(f"{'plan':>7} {'decided':>9} {'printed':>8}  state")
-        for plan_id in read_gold_list(args.list):
-            payload = load_gold(plan_id)
+        known = sorted(p.stem for p in OUT_DIR_JSON.glob("*.json")) if OUT_DIR_JSON.exists() else []
+        if not known:
+            print("  (nothing recorded yet)")
+            return 0
+        for plan_id in known:
+            payload = load_record(plan_id)
             if not payload:
                 print(f"{plan_id:>7} {'-':>9} {'-':>8}  not started")
                 continue
@@ -461,7 +458,7 @@ def main() -> int:
         return 0
 
     for plan_id in plan_ids:
-        payload = load_gold(plan_id)
+        payload = load_record(plan_id)
         if payload.get("complete") and not args.review:
             print(f"plan {plan_id}: already complete, skipping "
                   f"(use --review {plan_id} to reopen)")
@@ -470,18 +467,9 @@ def main() -> int:
             print("\nsaved. Re-run to continue where you stopped.")
             return 0
 
-    # Report against the whole list, not just the plans this invocation touched: after a
-    # --review of one plan, "all plans are complete" would be plainly false.
-    full = read_gold_list(args.list)
-    done = [p for p in full if load_gold(p).get("complete")]
-    print(f"\n{len(done)} of {len(full)} gold plans complete.")
-    if len(done) < len(full):
-        print("Re-run to carry on with the rest:")
-        print("  docker compose run --rm --no-deps api python /eval/label_helper.py")
-    else:
-        print("Next, to measure how far printed areas sit from the polygons (free):")
-        print("  docker compose run --rm --no-deps api python "
-              "/eval/tier4_gold_validation.py")
+    done = [p for p in plan_ids if load_record(p).get("complete")]
+    print(f"\n{len(done)} of {len(plan_ids)} plan(s) complete. "
+          f"Written to {OUT_DIR_JSON}.")
     return 0
 
 

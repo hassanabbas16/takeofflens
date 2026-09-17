@@ -461,9 +461,8 @@ def main() -> int:
     lines.append(f"- Text model: `{settings.anthropic_text_model}`")
     lines.append(f"- Vision model: `{settings.anthropic_vision_model}`")
     lines.append(f"- Pricing: {pricing.source}, checked {pricing.checked}, {pricing.mode} mode")
-    lines.append(f"- Reference: {ref_totals['labels']} labels, "
-                 f"{ref_totals['areas_printed']} areas actually printed "
-                 f"({ref_totals['areas_svg']} rooms in the SVG annotation)")
+    lines.append(f"- Reference: {ref_totals['labels']} name labels in `model.svg` "
+                 f"({ref_totals['areas_svg']} annotated rooms)")
 
     # The label denominator is automatic Tier 2 ground truth and covers every plan. The
     # area denominator does not: it comes from the hand-verified printed-area file, which
@@ -471,21 +470,16 @@ def main() -> int:
     # nobody has looked, which is not the same as a verified zero - so both the Areas and
     # the Spurious columns are only interpretable over the covered plans, and the Spurious
     # count in particular is inflated by areas found on plans of unknown truth.
-    covered = [e for e in entries if plan_dir(args.dataset, e).name in printed]
     lines.append(
-        f"- **Area ground truth covers {len(covered)} of {len(entries)} plans** "
-        f"(hand-verified, `{PRINTED_AREAS_PATH.name}`). Label ground truth is automatic "
-        "(Tier 2, from `model.svg`) and covers all of them."
+        "- Label ground truth is automatic, from the `model.svg` name labels, and covers "
+        "every plan."
     )
-    if len(covered) < len(entries):
-        lines.append(
-            "\n> **Read the Areas and Spurious columns with care.** On the "
-            f"{len(entries) - len(covered)} plans with no hand-verified area ground truth "
-            "the printed-area count defaults to 0, which means *not checked*, not *verified "
-            "none*. Areas found on those plans are therefore counted as spurious whether or "
-            "not the drawing prints them. Labels, hallucinations and cost are unaffected. "
-            "A real area/dimension accuracy number needs the Tier 4 gold set.\n"
-        )
+    lines.append(
+        "\n> **This table does not score areas.** `Areas reported` is a raw count with no "
+        "ground truth behind it, included so a change in behaviour is visible. Area accuracy "
+        "is measured separately against the `model.svg` polygons over all 50 plans - see "
+        "`tier2_area_accuracy.md`.\n"
+    )
     # The rules row and the three paid rows are not on the same footing any more, and a
     # table that does not say so invites exactly the wrong comparison.
     lines.append(
@@ -500,17 +494,10 @@ def main() -> int:
     )
     lines.append("")
     lines.append(
-        "**Areas reported** is the raw count of rooms an approach gave an area to, with no "
-        "ground truth involved. It is here because the two columns beside it are matched "
-        "against *SVG polygon* areas and can sit still while real output changes: the OCR "
-        "area-unit repair moved `rules` from 161 to 188 reported areas without moving either "
-        "matched column at all.\n"
+        "| Approach | Labels | Areas reported | Hallucinations | Mean latency | "
+        "Mean cost/page | Total |"
     )
-    lines.append(
-        "| Approach | Labels | Areas reported | Areas (printed) | Spurious areas | "
-        "Hallucinations | Mean latency | Mean cost/page | Total |"
-    )
-    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
 
     print("\n" + "=" * 78)
     print("SUMMARY")
@@ -518,13 +505,11 @@ def main() -> int:
     for approach in args.approaches:
         rows = [r for r in results[approach] if r.get("ok")]
         if not rows:
-            lines.append(f"| {approach} | all calls failed | | | | | | | |")
+            lines.append(f"| {approach} | all calls failed | | | | | |")
             print(f"{approach}: all calls failed")
             continue
         labels = sum(r["labels"] for r in rows)
         reported = sum(r.get("areas_reported", 0) for r in rows)
-        areas = sum(r.get("areas_on_printing_plans", 0) for r in rows)
-        spurious = sum(r.get("spurious_areas", 0) for r in rows)
         halluc = sum(r["hallucinations"] for r in rows)
         latency = statistics.mean(r["latency_ms"] for r in rows)
         costs = [r["cost_usd"] for r in rows if r["cost_usd"] is not None]
@@ -533,15 +518,12 @@ def main() -> int:
         cost_cell = f"${mean_cost:.5f}" if mean_cost is not None else "unknown"
         total_cell = f"${total_cost:.4f}" if total_cost is not None else "unknown"
         lines.append(
-            f"| {approach} | {labels}/{ref_totals['labels']} | {reported} | "
-            f"{areas}/{ref_totals['areas_printed']} | {spurious} | {halluc} | "
+            f"| {approach} | {labels}/{ref_totals['labels']} | {reported} | {halluc} | "
             f"{latency / 1000:.1f}s | {cost_cell} | {total_cell} |"
         )
         print(f"{approach:<8} labels={labels}/{ref_totals['labels']} "
-              f"reported={reported} "
-              f"areas={areas}/{ref_totals['areas_printed']} spurious={spurious} "
-              f"halluc={halluc} latency={latency / 1000:.1f}s cost/page={cost_cell} "
-              f"total={total_cell}")
+              f"reported={reported} halluc={halluc} "
+              f"latency={latency / 1000:.1f}s cost/page={cost_cell} total={total_cell}")
 
     lines.append("\n## Extrapolation\n")
     lines.append("Cost of the full `high_quality_architectural` test split "

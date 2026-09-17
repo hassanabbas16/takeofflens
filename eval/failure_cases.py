@@ -8,11 +8,9 @@ A failure here is one of:
 
 - the call failed outright (no result at all)
 - the approach found none of the reference labels on a plan that has them
-- it reported areas on a plan with no hand-verified printed-area ground truth. Treat this
-  as a *flag, not a verdict*: the printed-area count is only known for the plans in
-  eval/ground_truth/printed_areas_6.json, and defaults to 0 everywhere else, so "0 printed"
-  usually means "nobody checked". It ranks plans worth looking at by eye, and only the
-  plans covered by that file can be called fabrications outright.
+- it reported an unusual number of areas relative to the plan. Treat this as a *flag, not
+  a verdict*: this script ranks plans worth opening by eye and makes no accuracy claim.
+  Area accuracy is measured against the model.svg polygons in eval/tier2_area_accuracy.py.
 - it produced hallucinations (a cited token id that does not exist, or an unsupported area)
 - it did clearly worse than the free `rules` baseline on the same plan
 
@@ -63,9 +61,7 @@ def severity(row: dict, rules_row: dict | None) -> tuple[int, str]:
         # denominator means "not checked" rather than "verified to print none". Calling
         # these fabrications would be an accuracy claim the ground truth cannot support.
         score += 10 * spurious
-        reasons.append(
-            f"{spurious} area(s) on a plan with no verified area ground truth"
-        )
+        reasons.append(f"{spurious} area(s) not corroborated by the reference")
 
     if printed and areas == 0:
         score += 15

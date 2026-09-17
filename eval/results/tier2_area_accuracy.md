@@ -1,17 +1,17 @@
 # Area accuracy vs the `model.svg` polygons - all 50 sampled plans
 
-- Ground truth: **automatic (Tier 2)**, the shoelace area of the CubiCasa annotation polygon. Not hand-verified.
+- Ground truth: **automatic**, the shoelace area of the CubiCasa annotation polygon. No human labelling anywhere in this metric.
 - 45 plans, 691 annotated rooms of at least 1 m2 with a name
 - Match tolerance: **5%**, on room **and** area together
 - Computed entirely from cache. No API calls.
 
 > **What a polygon area is and is not.** It is the area CubiCasa's annotator drew,
 > following the inner wall face. It is *not* the figure printed on the drawing,
-> which uses the agent's own convention. The two disagree by a few percent, so a
-> correct reading can still be scored wrong here. How often that happens is measured
-> on a 5-plan hand-labelled set - see `tier4_gold_validation.md` - rather than
-> assumed. Treat these as comparative numbers between approaches, which is what they
-> are good for, not as absolute accuracy against the page.
+> which uses the estate agent's own convention. The two disagree systematically -
+> quantified in the next section from this run's own data - so a correct reading can
+> still be scored wrong at a tight tolerance. Treat these as comparative numbers
+> between approaches, which is what they are good for, not as absolute accuracy
+> against the page.
 
 ## The polygon is systematically smaller than the printed figure
 
@@ -23,7 +23,7 @@ Measured over every label-matched `rules` pair on these plans (n = 145), as (ext
 
 The polygon follows the inner wall face; the printed figure does not. On plan 416, where every extracted value was checked against the drawing by eye, the correct readings sit +8% to +13% from their polygons - MH 12.3 vs 11.24, TH 7.4 vs 6.83, KHH 6.0 vs 5.46. **A 5% band cannot contain a systematic offset of that size**, so at 5% this metric scores correct readings as wrong.
 
-That is a property of the ground truth, not of the matcher, which is why both tolerances are reported. Quantifying it against the drawing is the one job the 5-plan hand-labelled set exists to do.
+That is a property of the ground truth, not of the matcher, which is why both tolerances are reported.
 
 ## Does this metric track a real improvement?
 

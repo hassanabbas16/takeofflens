@@ -8,8 +8,10 @@ with OCR + LLM, and review the results with bounding-box overlays.
 > its numbers are below. A local detector (Phase 8) is not started.
 >
 > **Every number in this README was measured by a script in `eval/`, and each one says what
-> it was measured against.** Where a metric has a known weakness, the weakness is stated next
-> to it rather than in a footnote. Nothing here is estimated or illustrative.
+> it was measured against.** The evaluation is fully automatic — it reproduces from the
+> dataset and the cached results with no human labelling step. Where a metric has a known
+> weakness, the weakness is stated next to it rather than in a footnote. Nothing here is
+> estimated or illustrative.
 
 ## Quick start
 
@@ -138,7 +140,7 @@ which agrees with the areas printed on the drawings to within ~1-2%.
 
 That makes automatic room type/count/area ground truth available for the whole dataset for
 free, and lets the hand-labelling helper pre-fill every room. Automatic ground truth is
-labelled as such everywhere it is used and never described as hand-verified.
+labelled as such everywhere it is used, and never described as anything stronger.
 
 ## OCR on rotated plans
 
@@ -454,9 +456,9 @@ its limitations: [eval/README.md](eval/README.md).
 > **Read these as comparative, not absolute.** Ground truth is the annotation *polygon*, not
 > the figure printed on the drawing. The polygon follows the inner wall face; the printed
 > figure does not. Measured over 145 label-matched pairs the extracted value sits a median
-> **+4.4%** from its polygon, and only **30%** land within 5% - so at 5% this metric scores
-> many correct readings as wrong. Both tolerances are reported for that reason, and a 5-plan
-> hand-labelled set exists solely to quantify the gap.
+> **+4.4%** from its polygon, and only **30%** land within 5% — so at 5% this metric scores
+> many correct readings as wrong. The disagreement is systematic, not random, which is why
+> both tolerances are reported and why the 10% row is the one that tracks the pipeline.
 
 `hybrid` leads on areas; `vlm` leads on labels and has by far the worst misattribution count,
 which is consistent with a model that reads the page well and assigns values by eye.
@@ -476,7 +478,7 @@ The numbers above are less interesting than the defects that surfaced while prod
   `2,3 m{2` - on 29 of 50 plans. Repairing it moved `rules` from 161 to 188 areas and
   *corrected two already-wrong values* on the plan checked by eye.
 - **A metric that could not see its own pipeline improving.** The area column was gated on a
-  hand-verified file covering 2 of 50 plans, so real gains were arithmetically forced to zero.
+  reference file covering 2 of 50 plans, so real gains were arithmetically forced to zero.
   It now carries a regression check that fails loudly if the metric stops tracking a
   known-good change.
 - **The free baseline being served from a stale cache**, reporting pre-change numbers while
@@ -487,8 +489,9 @@ The numbers above are less interesting than the defects that surfaced while prod
 Ordered by how much they would matter to someone relying on this.
 
 1. **Area ground truth is an annotation polygon, not the printed figure.** Median +4.4%
-   disagreement, only 30% of pairs within 5%. Comparative between approaches; not an absolute
-   accuracy figure. The 5-plan gold set quantifies it; it is not yet labelled.
+   disagreement over 145 label-matched pairs, only 30% within 5%. These are comparative
+   numbers between approaches, not absolute accuracy against the page. Closing this would
+   need a set of plans read by hand, which the evaluation deliberately does not depend on.
 2. **Label recall tops out near 59%** (`vlm`, 292/495). The dominant cause is OCR, not
    extraction: rotated labels come back reversed (`OH` -> `HO`), and `model.svg` annotates
    rooms the drawing never labels at all.

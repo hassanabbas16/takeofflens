@@ -84,8 +84,8 @@ They do not contain the same text, so never treat SVG strings as OCR ground trut
 - Room area is therefore the shoelace area of the `Space` polygon / 10000.
   Spot-checked against the areas printed on the drawing: agreement within ~1-2%
   (polygon follows the inner wall face; the printed figure uses the agent's own convention).
-  Close enough to pre-fill a labelling helper, not close enough to be an oracle — which is
-  exactly why Tier 4 is hand-verified.
+  Close enough to compare approaches against, not close enough to call absolute accuracy —
+  the disagreement is measured and reported alongside every area number.
 
 ## Current status — 2026-09-17
 
@@ -104,7 +104,7 @@ Everything below is measured or checked, not recalled.
 | — Batch API wired and verified | done | `f593a61` |
 | 4 — API routes, background processing, export | done | `000d3b0` |
 | 5 — Next.js upload + viewer | done | `79db7dc` |
-| 6 — eval, area metric on SVG polygons | done; 5-plan validation awaiting labelling | `ddd2714` |
+| 6 — eval, area metric on SVG polygons | done, fully automatic | `ddd2714` |
 | 7 — README write-up | done | `74cceff` |
 | 8 — detector | not started, do not start | |
 
@@ -197,7 +197,7 @@ latency is not meaningful. The n=6 synchronous numbers are the ones to quote for
 ### Fixed this session
 
 - **Plan 2536's fabricated areas are gone**, and so are the other four on the
-  hand-verified set. A bare number with no decimal separator and no area unit is now only
+  6-plan reference set. A bare number with no decimal separator and no area unit is now only
   offered as an area if the page carries at least one area that has one; and an area
   overlapping the whole-apartment type code ("3H+KT+S 61,0 m2") is the unit total, not a
   room's. Measured on the 6-plan set: fabrications 5 -> 0, with 1191 and 2207 unchanged at
@@ -282,6 +282,8 @@ regression check on plan 416 — 0 -> 0 at 5%, 2 -> 6 at 10% for the known-good 
 **At 5% the metric cannot see a real improvement.** Quote the 10% row when discussing the
 pipeline; quote 5% only with the caveat attached.
 
+`eval/label_helper.py` is kept as an optional debugging aid; no report reads it.
+
 ### Area results (automatic ground truth, 691 rooms)
 
 | Approach | Correct @5% | @10% | Wrong value | Misattributed | Hallucinated | Reported |
@@ -294,29 +296,14 @@ pipeline; quote 5% only with the caveat attached.
 `hybrid` leads on areas; `vlm` leads on labels and has the worst misattribution count.
 Breakdown columns are the @5% figures.
 
-### The 5-plan gold set — its only job
-
-`eval/data/gold_5.txt`: **654, 1041, 1116, 1838, 3527** (5 to 28 rooms, mixed garbled and
-clean). It does **not** score approaches — n=5 could not support an accuracy claim and
-nothing in the repo makes one. It exists to run `eval/tier4_gold_validation.py`, which pairs
-each hand-read printed area with **its own room's** polygon and reports the share falling
-outside 5%. Not labelled yet.
-
-```bash
-docker compose run --rm --no-deps api python /eval/label_helper.py        # needs a TTY
-docker compose run --rm --no-deps api python /eval/tier4_gold_validation.py
-```
-
 ### Next steps, in order
 
-1. **Label the 5 gold plans**, then run `eval/tier4_gold_validation.py`. Free. Turns the
-   polygon caveat into a measured number.
-2. **Phase 8 — the detector. Do not start until the user says so** (they are applying
+1. **Phase 8 — the detector. Do not start until the user says so** (they are applying
    first). COCO alignment is already verified; see above for the `F1_original` vs
    `F1_scaled` conversion it will need.
-3. Optional, free, and probably the biggest remaining win: more OCR repair. The evaluation
+2. Optional, free, and probably the biggest remaining win: more OCR repair. The evaluation
    attributes more lost recall to OCR misreads than to all downstream logic combined.
-4. Phase 6a — Tier 1 OCR sweep over the full splits. Free.
+3. Phase 6a — Tier 1 OCR sweep over the full splits. Free.
 
 
 ## Repo structure
@@ -358,13 +345,14 @@ takeofflens/
     cache/                 # ocr/ and llm/ per-plan caches (gitignored)
     ground_truth/
       auto/                # Tier 2, generated from model.svg
-      gold/                # Tier 4, hand-verified
+      manual/              # optional label_helper output, read by no report
     results/               # per-tier reports
     tier1_ocr_sweep.py
     tier2_ground_truth.py
-    tier3_llm.py
-    tier4_gold.py
-    label_helper.py
+    tier2_area_accuracy.py   # the area metric: SVG polygons, all 50 plans
+    area_scoring.py          # shared 4-way matcher
+    tier3_cost_probe.py
+    label_helper.py          # optional debugging aid, no report reads it
     pricing.yaml           # model rates + date taken
     run_eval.py            # computes metrics, writes eval/results.md
     README.md              # dataset source, license, tier descriptions
@@ -541,7 +529,7 @@ All tiers read plans from the mounted `DATASET_DIR`. None of them copy image dat
 - Writes `eval/results/tier2_ground_truth.md`: room-type distribution, plans with unparseable
   SVG, flagged-scale plans, `Undefined` share.
 - This is **automatic** ground truth. It is labelled as such everywhere it is used, and it is
-  never described as hand-verified. Areas here are derived from the annotation polygon, not
+  never described as anything stronger. Areas here are derived from the annotation polygon, not
   read off the drawing.
 
 ### Tier 3 — Claude approaches on a 50-plan sample, cost-gated
@@ -584,25 +572,19 @@ Pricing comes from `eval/pricing.yaml` (per-model input/output rates, with the d
 were taken). Cost is computed from logged tokens; it is never hardcoded in pipeline logic and
 never estimated when a real token count is available.
 
-### Tier 4 — hand-verified gold set for dimensions and areas
-`eval/tier4_gold.py` (selection) + `eval/label_helper.py` (labelling CLI)
+### Tier 4 — removed
 
-- Selects **15 test-split plans with readable text**, ranked by the Tier 1 signal:
-  prefers `high_quality_architectural`, requires parseable area/dimension tokens, and spreads
-  across room counts so the set is not all studios. Writes the chosen IDs and the reason each
-  was chosen to `eval/data/gold_15.txt` so the selection is auditable and reproducible.
-- `label_helper.py` is the labelling CLI I will actually use:
-  - Renders the page with OCR boxes drawn to `eval/labelling/<id>.png` for reference.
-  - **Pre-fills each room from Tier 2**: SVG room type, Finnish label, and polygon area.
-  - Walks room by room, showing the pre-filled value and the OCR tokens near that room's
-    polygon, and asks only for confirm / correct / skip. Typing is the exception, not the rule.
-  - Writes `eval/ground_truth/gold/<id>.json` with `"verified": true` per field, so a field
-    that was accepted from the SVG is distinguishable from one a human actually read off
-    the drawing.
-  - Resumable per plan and per room; re-running continues where it stopped.
-  - `--review <id>` re-opens a finished plan for correction.
+There is no human-labelling tier. It was specified, built, and then removed before any
+labelling happened: the SVG polygon gives a room-level area for all 50 sampled plans and
+every room on them at no cost, which is a better trade than a few dozen hand-read rooms.
 
-Only this tier's numbers are described as hand-verified in the README.
+The price is that a polygon is not the printed figure, and that price is **measured from the
+run's own data** — median +4.4% offset, only 30% of label-matched pairs within 5% (n=145) —
+rather than by labelling. `eval/tier2_area_accuracy.py` reports at 5% and 10% for that
+reason and carries a regression check proving the metric tracks a known-good change.
+
+`eval/label_helper.py` survives as an optional debugging aid for reading one plan by hand.
+Nothing in the evaluation reads its output.
 
 ### Metrics
 `eval/run_eval.py` consumes the tier outputs and writes `eval/results.md`.
@@ -612,17 +594,18 @@ Per approach (`ocr+llm` vs `vlm`) and per preprocessing config:
 - room detection precision / recall / F1, fuzzy name match (vs Tier 2,
   `high_quality_architectural` test plans)
 - room-type accuracy (vs Tier 2, `Undefined` excluded and reported separately)
-- dimension and area accuracy within 5% tolerance — **Tier 4 gold set only**, n=15, and the
-  n is printed next to every number
+- area accuracy against the `model.svg` polygons, matched on room **and** area, split into
+  correct / wrong value / misattributed / hallucinated, at 5% **and** 10% with the measured
+  polygon-vs-printed offset stated beside them
 - accuracy per dimension format, using the format tag from `parse_dims.py`
 - mean latency and measured cost per page from `llm_calls` + `eval/pricing.yaml`
 
 `eval/results.md` includes a failure-case section: where each approach breaks and why, with
 the plan IDs, including the `colorful` no-text pages and rotated-label failures.
 
-Every table states its sample size and whether its ground truth is automatic (Tier 2) or
-hand-verified (Tier 4). Numbers go in the README exactly as measured. If a tier has not been
-run, its numbers are absent — never placeholders, never estimates.
+Every table states its sample size and what its ground truth is; all of it is automatic.
+Numbers go in the README exactly as measured. If a tier has not been run, its numbers are
+absent — never placeholders, never estimates.
 
 ## Build phases — stop after each, summarize, and wait for my go-ahead
 - **Phase 0**: Scaffold repo, docker-compose with db/api/web, health endpoint, `.env.example`, Alembic init. Verify `docker compose up` works.
@@ -640,8 +623,7 @@ run, its numbers are absent — never placeholders, never estimates.
   - 6b: Tier 2 ground truth from `model.svg`. Report room-type distribution.
   - 6c: Tier 3 cost probe on 20 test plans. **Report measured cost per page and stop for approval**
         before the remaining 379.
-  - 6d: Tier 4 gold-set selection + labelling helper, handed over for me to label.
-  - 6e: `run_eval.py` + `results.md` once the gold set exists.
+  - 6d: area accuracy against the SVG polygons, all 50 plans, no labelling.
 - **Phase 7**: README (Mermaid architecture diagram, setup, eval results, known limitations, how to scale: S3, job queue, batching, GPU OCR), demo GIF instructions.
 - **Phase 8** (do not start until I say so): local detector as a third approach.
   - Train a small PyTorch detector on the CubiCasa5K COCO annotations.

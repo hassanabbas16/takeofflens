@@ -3,15 +3,18 @@
 **Automatic ground truth, not hand-verified.** Every number here is measured against the
 shoelace area of the CubiCasa annotation polygon, and the README and every table say so.
 
-Why this replaces the hand-labelled path as the primary area metric
--------------------------------------------------------------------
-Hand-labelling 15 plans is expensive and yields n=15. The SVG polygon gives a room-level area
-for all 50 plans and every room on them, at no cost, which is 736 rooms rather than a few
-dozen. The price is that a polygon area is not the figure printed on the drawing: the polygon
-follows the inner wall face and the printed figure uses the agent's own convention, so they
-disagree by a small percentage. That disagreement is the method's limitation, and it is
-**measured rather than assumed** - see ``eval/tier4_gold_validation.py``, which uses a 5-plan
-hand-labelled set for exactly this and nothing else.
+The one metric, and its limitation
+----------------------------------
+The SVG polygon gives a room-level area for all 50 plans and every room on them at no cost -
+691 rooms. The price is that a polygon area is not the figure printed on the drawing: the
+polygon follows the inner wall face and the printed figure uses the estate agent's own
+convention, so the two disagree.
+
+That disagreement is **measured, not assumed**, and from this run's own data: the offset
+between each extracted value and its own room's polygon is reported below over 145
+label-matched pairs. Because it is systematic rather than random, a 5% band cannot contain
+it, so the results are given at 5% and 10% and the 10% row is the one that tracks the
+pipeline.
 
 Categories are defined in ``eval/area_scoring.py``. Runs entirely from cache: `rules` is
 recomputed (free, deterministic) and the three paid approaches are replayed from the raw
@@ -218,19 +221,19 @@ def main() -> int:
     lines = [
         "# Area accuracy vs the `model.svg` polygons - all 50 sampled plans",
         "",
-        "- Ground truth: **automatic (Tier 2)**, the shoelace area of the CubiCasa "
-        "annotation polygon. Not hand-verified.",
+        "- Ground truth: **automatic**, the shoelace area of the CubiCasa annotation "
+        "polygon. No human labelling anywhere in this metric.",
         f"- {n} plans, {rooms} annotated rooms of at least {MIN_GOLD_AREA_M2:g} m2 with a name",
         f"- Match tolerance: **{args.tolerance:.0%}**, on room **and** area together",
         "- Computed entirely from cache. No API calls.",
         "",
         "> **What a polygon area is and is not.** It is the area CubiCasa's annotator drew,",
         "> following the inner wall face. It is *not* the figure printed on the drawing,",
-        "> which uses the agent's own convention. The two disagree by a few percent, so a",
-        "> correct reading can still be scored wrong here. How often that happens is measured",
-        "> on a 5-plan hand-labelled set - see `tier4_gold_validation.md` - rather than",
-        "> assumed. Treat these as comparative numbers between approaches, which is what they",
-        "> are good for, not as absolute accuracy against the page.",
+        "> which uses the estate agent's own convention. The two disagree systematically -",
+        "> quantified in the next section from this run's own data - so a correct reading can",
+        "> still be scored wrong at a tight tolerance. Treat these as comparative numbers",
+        "> between approaches, which is what they are good for, not as absolute accuracy",
+        "> against the page.",
         "",
         "## The polygon is systematically smaller than the printed figure",
         "",
@@ -248,8 +251,7 @@ def main() -> int:
         "at 5% this metric scores correct readings as wrong.",
         "",
         "That is a property of the ground truth, not of the matcher, which is why both "
-        "tolerances are reported. Quantifying it against the drawing is the one job the "
-        "5-plan hand-labelled set exists to do.",
+        "tolerances are reported.",
         "",
         "## Does this metric track a real improvement?",
         "",

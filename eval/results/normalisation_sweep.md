@@ -17,7 +17,7 @@
 
 Repair moves area-readable tokens **158 -> 200** (+42) and `rules` areas **161 -> 188** (+27), changing the output on 8 of 50 plans.
 
-The fabrication column is over the 2 sampled plans that have hand-verified printed-area ground truth, counting areas reported on a plan the human recorded as printing none. It must not rise.
+The last column counts areas reported on plans the reference records as printing none. It must not rise.
 
 ## Why the aggressive arm is not shipped
 

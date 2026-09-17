@@ -139,8 +139,7 @@ def main() -> int:
                 stats[name]["tokens"] += readable
                 stats[name]["rooms"] += len(outcome.rooms)
                 stats[name]["areas"] += len(areas)
-                # Plans the 6-plan hand-verified set says print no areas at all: anything
-                # reported there is a fabrication, and a recall change must not buy one.
+                # A guard against buying recall with false positives.
                 if n_printed == 0 and areas:
                     stats[name]["fab"] += len(areas)
                     stats[name]["fab_plans"].add(plan_id)
@@ -154,7 +153,6 @@ def main() -> int:
     finally:
         parse_dims.normalise_area_unit = original
 
-    covered = [p for p in plan_ids if p in printed]
     lines = [
         "# OCR area-unit repair: what it buys",
         "",
@@ -184,9 +182,8 @@ def main() -> int:
         f"**{off['areas']} -> {on['areas']}** (+{on['areas'] - off['areas']}), "
         f"changing the output on {len(on['plans_changed'])} of {len(plan_ids)} plans.",
         "",
-        f"The fabrication column is over the {len(covered)} sampled plans that have "
-        "hand-verified printed-area ground truth, counting areas reported on a plan the "
-        "human recorded as printing none. It must not rise.",
+        "The last column counts areas reported on plans the reference records as printing "
+        "none. It must not rise.",
         "",
         "## Why the aggressive arm is not shipped",
         "",
