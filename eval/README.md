@@ -47,33 +47,95 @@ test plans). Room area = shoelace area of the `Space` polygon / 10000.
 | 3 | `tier3_cost_probe.py` | **paid, gated** | — (runs all three Claude approaches) |
 | 4 | `tier4_gold.py` + `label_helper.py` | free | hand-verified, 15 plans |
 
+## Tiers
+
+| Tier | Script | Cost | Ground truth |
+| --- | --- | --- | --- |
+| 1 | `tier1_ocr_sweep.py` | free | — (OCR sweep, resumable + cached) |
+| 2 | `tier2_ground_truth.py` | free | automatic, from `model.svg` |
+| 2 | **`tier2_area_accuracy.py`** | free | **automatic — the primary area metric** |
+| 3 | `tier3_cost_probe.py` | **paid, gated** | — (runs the three Claude approaches) |
+| 4 | `tier4_gold.py` + `label_helper.py` + `tier4_gold_validation.py` | free | hand-verified, 5 plans, **validates Tier 2** |
+
 Tier 3 stops after 20 test plans and reports measured cost per page. The full run requires
 explicit approval. See CLAUDE.md for the full tier definitions.
 
-Every table in `results.md` states its sample size and whether its ground truth is automatic
-(Tier 2) or hand-verified (Tier 4).
+Every table states its sample size and whether its ground truth is automatic (Tier 2) or
+hand-verified (Tier 4).
 
-## Tier 4: labelling the gold set
+## How area accuracy is measured
 
-Fifteen plans, hand-verified for the **areas the drawing actually prints**. This is the only
-tier whose numbers may be described as hand-verified, and the only one that can support an
-area-accuracy figure: Tier 2's areas come from the annotation polygon, not from the page.
+### The method
 
-The 15 are drawn from the 50-plan Tier 3 sample, so their results for all four approaches
-are already paid for and scoring them costs nothing.
+Area accuracy is scored against the **shoelace area of the `model.svg` annotation polygon**,
+for every named room of at least 1 m² on all 50 sampled plans — 691 rooms. It is free, it
+covers every room rather than a hand-labelled handful, and it is recomputed from cache, so
+`eval/tier2_area_accuracy.py` costs nothing to re-run after a pipeline change.
 
-### 1. Select (already done, re-runnable)
+A prediction is matched on **room and area together**. An area alone is not a takeoff: a tool
+that reports the right number against the wrong room produces a quantity survey that does not
+add up. Every prediction falls into exactly one of four buckets:
+
+| Bucket | Meaning | What it points at |
+| --- | --- | --- |
+| `correct` | right room, area within tolerance | — |
+| `wrong_value` | the room is real and was found, the number is wrong | extraction |
+| `misattributed` | the number is a real area on the page, on the wrong room | **bbox pairing** |
+| `hallucinated` | neither the room nor the number corresponds to anything | extraction |
+
+Splitting `misattributed` out matters because it has a different fix from the others: the
+page was read correctly and the assignment failed. Matching areas as a bare multiset — which
+an earlier version did — cannot tell these apart, and worse, scores wrong answers as right:
+on plan 416 it matched a `K 7.0` (the kitchen is really 11.6) against an unrelated 6.8 m²
+room and counted it correct.
+
+### The limitation, and why 10% is reported beside 5%
+
+**A polygon area is not the figure printed on the drawing.** The polygon follows the inner
+wall face; the printed figure uses the estate agent's own convention. Measured over 145
+label-matched pairs on these plans, the extracted value sits a median **+4.4%** from its
+polygon, and only **30%** of pairs land within 5%.
+
+On plan 416, where every extracted value was checked against the drawing by eye, the
+*correct* readings sit +8% to +13% from their polygons — MH 12.3 vs 11.24, TH 7.4 vs 6.83,
+KHH 6.0 vs 5.46. A 5% band cannot contain a systematic offset that size.
+
+The consequence is concrete and auditable. The OCR `m²` repair is a known-good change that
+took plan 416 from 3 of 6 correct to 8 of 9:
+
+| Tolerance | `rules` correct on 416, before | after |
+| --- | --- | --- |
+| 5% | 0 | 0 |
+| 10% | 2 | 6 |
+
+**At 5% the metric cannot see a real improvement; at 10% it can.** That is a property of the
+ground truth, not of the matcher. So the results table reports both, and the 10% row is the
+one that tracks the pipeline. Neither is an absolute accuracy figure against the page —
+they are comparative numbers between approaches, which is what they are good for.
+
+### Validating the limitation — the 5-plan gold set
+
+The polygon gap above is measured *against the polygons themselves*, so it cannot separate
+"the extractor is wrong" from "the polygon disagrees with the drawing". Five plans are
+hand-labelled for exactly that, and nothing else:
 
 ```bash
-docker compose run --rm --no-deps api python /eval/tier4_gold.py
+docker compose run --rm --no-deps api python /eval/tier4_gold.py          # already run
+docker compose run --rm --no-deps api python /eval/label_helper.py        # needs a TTY
+docker compose run --rm --no-deps api python /eval/tier4_gold_validation.py
 ```
 
-Writes `eval/data/gold_15.txt` with the chosen plans, the reason each was chosen, and the
-reason every other plan was not. Eligibility is >= 3 readable area tokens in the cached OCR;
-the pick is round-robin across room-count bands, preferring plans whose area text OCR
-garbled, because those are where the approaches actually differ.
+`tier4_gold_validation.py` pairs each human-read **printed** area with **its own room's**
+polygon and reports what share falls outside 5%. That single number turns the caveat above
+into a measurement: the rate at which the primary metric marks a correct reading wrong
+through no fault of the extractor.
 
-### 2. Label
+Five plans is enough because the job is characterising a systematic offset, not estimating
+accuracy. **n=5 could not support an accuracy claim, and nothing here makes one.** The five
+(654, 1041, 1116, 1838, 3527) span 5 to 28 rooms and mix clean and OCR-garbled area text;
+`eval/data/gold_5.txt` records why each was chosen and why every other plan was not.
+
+## Labelling the 5 gold plans
 
 ```bash
 docker compose run --rm --no-deps api python /eval/label_helper.py
@@ -81,8 +143,8 @@ docker compose run --rm --no-deps api python /eval/label_helper.py
 
 Needs a terminal, so run it exactly as above rather than through a pipe.
 
-For each plan it writes `eval/labelling/<id>.png` - the page with every OCR token boxed and
-numbered - and then walks the rooms `model.svg` lists. **Open that PNG beside the terminal.**
+For each plan it writes `eval/labelling/<id>.png` — the page with every OCR token boxed and
+numbered — and then walks the rooms `model.svg` lists. **Open that PNG beside the terminal.**
 The ids in the prompt are the ids drawn on the image.
 
 Each room shows the SVG label, the SVG polygon area (context only, not the answer), which
@@ -94,7 +156,7 @@ it. Then:
 | `Enter` or `y` | accept the suggested area as what the drawing prints |
 | `2` / `3` | take the second or third suggestion instead |
 | a number | the drawing prints this (`11.7` or `11,7` both work) |
-| `n` | the drawing prints **no** area for this room - a real answer, not a skip |
+| `n` | the drawing prints **no** area for this room — a real answer, not a skip |
 | `l` | correct the label |
 | `s` | skip, decide later (stays undecided) |
 | `b` | back one room |
@@ -102,13 +164,11 @@ it. Then:
 
 Three things worth knowing while labelling:
 
-- **The polygon area is not the answer.** It follows the inner wall face and disagrees with
-  the printed figure by a percent or two, sometimes much more on L-shaped rooms. It is shown
-  only so an implausible suggestion stands out.
+- **The polygon area is not the answer.** It is shown only so an implausible suggestion
+  stands out. Recording what the *drawing* prints is the entire point of this exercise.
 - **`n` is a measurement.** Plenty of these drawings print no area for hallways, outdoor
-  spaces and storage. Recording that is as valuable as recording a number, and it is what
-  stops a fabricated area from being scored as correct.
-- **"no token matches this label" usually means OCR read it rotated** - `OH` comes back as
+  spaces and storage. Recording that is as valuable as recording a number.
+- **"no token matches this label" usually means OCR read it rotated** — `OH` comes back as
   `HO`. The area is often still on the page; the tool lists the unclaimed ones so you can
   pick the value off the image and type it.
 
@@ -122,15 +182,3 @@ docker compose run --rm --no-deps api python /eval/label_helper.py --review 1041
 Output goes to `eval/ground_truth/gold/<id>.json`, recording for each room how the answer was
 reached (`confirmed_suggestion`, `typed`, `read_as_not_printed`), so a value accepted from the
 machine's suggestion is distinguishable from one typed after reading the page.
-
-### 3. Score, once the labelling is done
-
-```bash
-docker compose run --rm --no-deps api python /eval/tier4_area_accuracy.py
-```
-
-Free: `rules` is recomputed from the OCR cache and the three paid approaches are replayed
-from the raw batch bodies in `eval/cache/batch_raw/`. Reports precision and recall per
-approach, never averaged into one score - `rules` is conservative and `vlm` is liberal, and a
-single figure would hide exactly that. Plans that are not finished are excluded and named, so
-a partial labelling session gives a partial but honest table.
