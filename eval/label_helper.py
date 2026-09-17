@@ -3,6 +3,13 @@
     docker compose run --rm --no-deps api python /eval/label_helper.py
     docker compose run --rm --no-deps api python /eval/label_helper.py --review 1041
 
+Why only 5 plans
+----------------
+The primary area metric is now the SVG polygon over all 50 plans
+(``eval/tier2_area_accuracy.py``). These 5 exist to **validate** that method: to measure how
+often the figure printed on the drawing falls outside 5% of the polygon area. That turns the
+polygon's known weakness from a caveat into a number.
+
 What is being labelled
 ----------------------
 The **areas printed on the drawing**, with the label each is printed under. Not the SVG's
@@ -64,7 +71,7 @@ from svg_ground_truth import parse_model_svg, plan_dir
 GOLD_DIR = Path("/eval/ground_truth/gold")
 LABELLING_DIR = Path("/eval/labelling")
 OCR_CACHE_DIR = Path("/eval/cache/ocr")
-GOLD_LIST = Path("/eval/data/gold_15.txt")
+GOLD_LIST = Path("/eval/data/gold_5.txt")
 
 # Mirrors the pairing stage: an area sits within a few label-heights of its label.
 MAX_LABEL_HEIGHTS = 6.0
@@ -472,8 +479,9 @@ def main() -> int:
         print("Re-run to carry on with the rest:")
         print("  docker compose run --rm --no-deps api python /eval/label_helper.py")
     else:
-        print("Next, to score every approach against the gold set (free):")
-        print("  docker compose run --rm --no-deps api python /eval/tier4_area_accuracy.py")
+        print("Next, to measure how far printed areas sit from the polygons (free):")
+        print("  docker compose run --rm --no-deps api python "
+              "/eval/tier4_gold_validation.py")
     return 0
 
 

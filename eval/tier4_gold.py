@@ -1,9 +1,15 @@
-"""Tier 4 step 1: choose the 15 plans that will be hand-labelled.
+"""Tier 4 step 1: choose the 5 plans that will be hand-labelled.
 
-Drawn from the **50-plan Tier 3 sample**, not the whole test split. That is deliberate:
-those 50 already have cached results for all four approaches, so once the gold set is
-labelled, area accuracy can be computed for every approach without another API call.
-Picking gold plans from outside the sample would mean paying to re-run them.
+The gold set is no longer the primary area metric - that is now the SVG polygon, over all 50
+plans (``eval/tier2_area_accuracy.py``). These 5 plans exist to **validate** that method: to
+measure how often the figure printed on the drawing falls outside 5% of the polygon area, so
+the polygon's limitation is a measured number rather than a caveat.
+
+That is a much smaller job than scoring accuracy, which is why 5 plans is enough: it needs a
+sample spanning the ways plans vary, not statistical power over every room in the split.
+
+Drawn from the **50-plan Tier 3 sample**, so the validation applies to exactly the plans the
+main table is computed over.
 
 Selection is a documented, reproducible rule, not a hand-pick. Every chosen plan is written
 to ``eval/data/gold_15.txt`` with the reason it was chosen, and every rejected plan with the
@@ -105,11 +111,11 @@ def sample_plan_ids() -> list[str]:
 def choose(candidates: list[Candidate], count: int) -> list[tuple[Candidate, str]]:
     """Spread the pick across room counts, preferring plans with garbled areas.
 
-    Taking the top N by area count alone would bias the set towards big plans that print
-    everything cleanly. Instead the eligible plans are split into room-count bands and the
-    pick is taken round-robin across bands, so a studio and a six-bedroom house both appear.
-    Within a band, plans with more garbled-but-readable areas come first: those are the ones
-    that separate the approaches.
+    With only 5 plans to label, variety matters more than volume - the set has to span the
+    ways these drawings differ, or it will validate the polygon method against one house
+    style. Eligible plans are split into room-count bands and taken round-robin, so a small
+    flat and a large house both appear. Within a band, plans whose area text OCR garbled come
+    first: those exercise the repair and the pairing hardest.
     """
     eligible = [c for c in candidates if c.eligible]
 
@@ -143,9 +149,9 @@ def choose(candidates: list[Candidate], count: int) -> list[tuple[Candidate, str
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--count", type=int, default=15)
+    parser.add_argument("--count", type=int, default=5)
     parser.add_argument("--dataset", type=Path, default=Path("/data/cubicasa5k"))
-    parser.add_argument("--out", type=Path, default=Path("/eval/data/gold_15.txt"))
+    parser.add_argument("--out", type=Path, default=Path("/eval/data/gold_5.txt"))
     args = parser.parse_args()
 
     candidates: list[Candidate] = []
@@ -181,7 +187,7 @@ def main() -> int:
             skipped.append((c.plan_id, "eligible but not picked (band already filled)"))
 
     lines = [
-        "# Tier 4 gold set: 15 hand-labelled plans",
+        "# Tier 4 gold set: 5 hand-labelled plans",
         "#",
         "# Chosen by eval/tier4_gold.py from the 50-plan Tier 3 sample (seed 20260917), so",
         "# every plan here already has cached results for all four approaches and area",

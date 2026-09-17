@@ -1,9 +1,9 @@
-"""Tests for the Tier 4 room+area matcher.
+"""Tests for the shared room+area matcher in eval/area_scoring.py.
 
-The matcher lives in eval/, which is not importable from the api package, so it is loaded by
-path. It is tested here rather than left untested because it is what turns a labelling
-session into the project's headline accuracy number, and a silent bug in it would be
-invisible - there is nothing to compare its output against.
+It lives in eval/, which is not importable from the api package, so it is loaded by path. It
+is tested here rather than left untested because it produces the project's headline area
+numbers, and a silent bug in it would be invisible - there is nothing to check its output
+against.
 """
 
 from __future__ import annotations
@@ -12,23 +12,31 @@ import importlib.util
 import sys
 from pathlib import Path
 
-import pytest
-
-_EVAL = Path(__file__).resolve().parents[2] / "eval" / "tier4_area_accuracy.py"
+_EVAL = Path(__file__).resolve().parents[2] / "eval" / "area_scoring.py"
 
 
 def _load():
-    """Import eval/tier4_area_accuracy.py without importing its heavy module-level deps."""
-    spec = importlib.util.spec_from_file_location("tier4_area_accuracy", _EVAL)
+    """Import eval/area_scoring.py by path; eval/ is not a package on sys.path."""
+    spec = importlib.util.spec_from_file_location("area_scoring", _EVAL)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
 
-tier4 = pytest.importorskip("cv2") and _load()
-match = tier4.match
+area_scoring = _load()
 TOL = 0.05
+
+
+def match(predicted, gold, tol):
+    """Adapter to the old (correct, misattributed, spurious) shape these tests assert on.
+
+    score_plan splits the old "spurious" into wrong_value (the room exists, the number does
+    not) and hallucinated (neither), which is strictly more information. These tests predate
+    that split and still describe real behaviour, so they are kept and the two are summed.
+    """
+    s = area_scoring.score_plan(predicted, gold, tol)
+    return s.correct, s.misattributed, s.wrong_value + s.hallucinated
 
 
 def test_right_room_and_right_area_is_correct():

@@ -1,4 +1,4 @@
-# Tier 4 gold set: 15 hand-labelled plans
+# Tier 4 gold set: 5 hand-labelled plans
 #
 # Chosen by eval/tier4_gold.py from the 50-plan Tier 3 sample (seed 20260917), so
 # every plan here already has cached results for all four approaches and area
@@ -9,32 +9,28 @@
 # Eligible plans per band: large (9+ rooms) 32, medium (5-8 rooms) 8
 #
 # plan_id  reason
-416  # large (9+ rooms); 15 SVG rooms; 8 parser-readable + 6 garbled-readable areas
 654  # large (9+ rooms); 23 SVG rooms; 4 parser-readable + 20 garbled-readable areas
-1041  # medium (5-8 rooms); 8 SVG rooms; 4 parser-readable + 3 garbled-readable areas
+1041  # medium (5-8 rooms); 8 SVG rooms; 5 parser-readable + 2 garbled-readable areas
 1116  # large (9+ rooms); 22 SVG rooms; 10 parser-readable + 9 garbled-readable areas
-1339  # medium (5-8 rooms); 7 SVG rooms; 6 parser-readable + 0 garbled-readable areas
-1601  # medium (5-8 rooms); 7 SVG rooms; 15 parser-readable + 1 garbled-readable areas
-1622  # medium (5-8 rooms); 7 SVG rooms; 2 parser-readable + 1 garbled-readable areas
 1838  # medium (5-8 rooms); 5 SVG rooms; 8 parser-readable + 2 garbled-readable areas
-2031  # medium (5-8 rooms); 7 SVG rooms; 7 parser-readable + 0 garbled-readable areas
-2090  # medium (5-8 rooms); 6 SVG rooms; 6 parser-readable + 1 garbled-readable areas
 3527  # large (9+ rooms); 28 SVG rooms; 17 parser-readable + 7 garbled-readable areas
-5570  # large (9+ rooms); 12 SVG rooms; 14 parser-readable + 5 garbled-readable areas
-5886  # large (9+ rooms); 20 SVG rooms; 9 parser-readable + 5 garbled-readable areas
-9270  # large (9+ rooms); 14 SVG rooms; 2 parser-readable + 14 garbled-readable areas
-9976  # large (9+ rooms); 31 SVG rooms; 28 parser-readable + 19 garbled-readable areas
 
 # --- not chosen ---
 # 366  eligible but not picked (band already filled)
+# 416  eligible but not picked (band already filled)
 # 774  eligible but not picked (band already filled)
 # 1191  eligible but not picked (band already filled)
+# 1339  eligible but not picked (band already filled)
 # 1432  only 0 readable area token(s), need 3
 # 1511  eligible but not picked (band already filled)
 # 1551  eligible but not picked (band already filled)
+# 1601  eligible but not picked (band already filled)
+# 1622  eligible but not picked (band already filled)
 # 1636  only 2 readable area token(s), need 3
 # 1767  eligible but not picked (band already filled)
 # 1982  eligible but not picked (band already filled)
+# 2031  eligible but not picked (band already filled)
+# 2090  eligible but not picked (band already filled)
 # 2204  eligible but not picked (band already filled)
 # 2530  only 2 readable area token(s), need 3
 # 3984  eligible but not picked (band already filled)
@@ -43,8 +39,10 @@
 # 4707  eligible but not picked (band already filled)
 # 5046  eligible but not picked (band already filled)
 # 5089  only 2 readable area token(s), need 3
+# 5570  eligible but not picked (band already filled)
 # 5760  eligible but not picked (band already filled)
 # 5872  eligible but not picked (band already filled)
+# 5886  eligible but not picked (band already filled)
 # 5974  eligible but not picked (band already filled)
 # 6007  eligible but not picked (band already filled)
 # 6467  only 1 readable area token(s), need 3
@@ -57,7 +55,9 @@
 # 7780  only 0 readable area token(s), need 3
 # 7809  eligible but not picked (band already filled)
 # 8285  eligible but not picked (band already filled)
+# 9270  eligible but not picked (band already filled)
 # 9488  only 2 readable area token(s), need 3
 # 9572  eligible but not picked (band already filled)
+# 9976  eligible but not picked (band already filled)
 # 20000  eligible but not picked (band already filled)
 # 20003  only 0 readable area token(s), need 3
