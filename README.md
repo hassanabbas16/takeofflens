@@ -39,10 +39,10 @@ on the right.
 - A dash in the table means the value was **not printed on the page**. Width and length stay
   empty unless the drawing prints a `w × l` pair; they are never derived from an area.
 
-> **Note on Windows + Docker Desktop:** the Next dev server's file watcher does not see
-> edits made on the host through the bind mount (an inotify limitation, not a project bug),
-> so hot reload silently does nothing. Run `docker compose restart web` after editing
-> anything under `web/`.
+> **Windows and macOS note:** a bind mount does not deliver inotify events, so the Next
+> dev server would never notice a host edit. `WATCHPACK_POLLING=true` is set on the `web`
+> service in `docker-compose.yml` to make it poll instead, and hot reload works normally.
+> If you ever see edits not taking effect, check that variable first.
 
 ## Data findings
 
