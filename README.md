@@ -3,9 +3,9 @@
 Blueprint analysis: upload an architectural floor plan, extract rooms, dimensions and areas
 with OCR + LLM, and review the results with bounding-box overlays.
 
-> **Status: Phase 4.** Pipeline, four extraction approaches, API routes, background
-> processing and export are working end to end. The viewer (Phase 5) and the full eval
-> (Phase 6) are next. This README is replaced with the full write-up in Phase 7. No accuracy numbers
+> **Status: Phase 5.** Pipeline, four extraction approaches, API routes, background
+> processing, export and the web viewer are working end to end. The full eval (Phase 6) is
+> next. This README is replaced with the full write-up in Phase 7. No accuracy numbers
 > appear here until they have actually been measured.
 
 ## Quick start
@@ -20,6 +20,29 @@ docker compose up --build
 
 `/health` reports database connectivity and whether the CubiCasa5K dataset mount is present,
 so a misconfigured `DATASET_DIR` fails loudly at startup instead of deep inside an eval run.
+
+### Using the viewer
+
+Drop a PDF, PNG or JPG on the upload page. The page polls until the job reaches a terminal
+state, then opens the viewer: the page image with overlays on the left, the extracted rooms
+on the right.
+
+- **Approach toggle** — one button per extraction approach that actually produced rooms for
+  that page (`rules`, `ocr+llm`, `vlm`, `hybrid`). The interactive upload path runs whatever
+  `PIPELINE_APPROACHES` is set to, so a default install shows only `rules`; the buttons are
+  built from the data rather than hardcoded, so they follow that setting.
+- **OCR boxes** — toggles all OCR tokens, which is how you tell "the model misread it" apart
+  from "OCR never saw it". On these plans that distinction is most of the error budget.
+- **Hover** — hovering a table row highlights its box on the page, and vice versa.
+- **Ungrounded rooms** are shown with a red box and a badge rather than hidden. A claim that
+  could not be tied back to a token is the thing a reviewer most needs to see.
+- A dash in the table means the value was **not printed on the page**. Width and length stay
+  empty unless the drawing prints a `w × l` pair; they are never derived from an area.
+
+> **Note on Windows + Docker Desktop:** the Next dev server's file watcher does not see
+> edits made on the host through the bind mount (an inotify limitation, not a project bug),
+> so hot reload silently does nothing. Run `docker compose restart web` after editing
+> anything under `web/`.
 
 ## Data findings
 
