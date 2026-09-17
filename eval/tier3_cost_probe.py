@@ -312,6 +312,12 @@ def main() -> int:
                     "attempts": 1,
                 }
                 cache.write_text(json.dumps(row, indent=2), encoding="utf-8")
+                # Count it here. The scoring loop below reads these rows back as "cached"
+                # and skips the spend accounting, so without this a batch that really cost
+                # money reports $0.0000 spent - and the cap, checked against the same
+                # running total, would let a later call spend against a zero baseline.
+                spend["total"] += cost
+                spend["worst_page"] = max(spend["worst_page"], cost)
             print("batch complete; results cached\n")
 
     for entry in entries:
@@ -440,7 +446,30 @@ def main() -> int:
     lines.append(f"- Pricing: {pricing.source}, checked {pricing.checked}, {pricing.mode} mode")
     lines.append(f"- Reference: {ref_totals['labels']} labels, "
                  f"{ref_totals['areas_printed']} areas actually printed "
-                 f"({ref_totals['areas_svg']} rooms in the SVG annotation)\n")
+                 f"({ref_totals['areas_svg']} rooms in the SVG annotation)")
+
+    # The label denominator is automatic Tier 2 ground truth and covers every plan. The
+    # area denominator does not: it comes from the hand-verified printed-area file, which
+    # covers only the plans listed in it. For every other plan "printed areas" is 0 because
+    # nobody has looked, which is not the same as a verified zero - so both the Areas and
+    # the Spurious columns are only interpretable over the covered plans, and the Spurious
+    # count in particular is inflated by areas found on plans of unknown truth.
+    covered = [e for e in entries if plan_dir(args.dataset, e).name in printed]
+    lines.append(
+        f"- **Area ground truth covers {len(covered)} of {len(entries)} plans** "
+        f"(hand-verified, `{PRINTED_AREAS_PATH.name}`). Label ground truth is automatic "
+        "(Tier 2, from `model.svg`) and covers all of them."
+    )
+    if len(covered) < len(entries):
+        lines.append(
+            "\n> **Read the Areas and Spurious columns with care.** On the "
+            f"{len(entries) - len(covered)} plans with no hand-verified area ground truth "
+            "the printed-area count defaults to 0, which means *not checked*, not *verified "
+            "none*. Areas found on those plans are therefore counted as spurious whether or "
+            "not the drawing prints them. Labels, hallucinations and cost are unaffected. "
+            "A real area/dimension accuracy number needs the Tier 4 gold set.\n"
+        )
+    lines.append("")
     lines.append("| Approach | Labels | Areas (printed) | Spurious areas | Hallucinations | "
                  "Mean latency | Mean cost/page | Total |")
     lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
@@ -490,8 +519,17 @@ def main() -> int:
     if stop_reason:
         lines.append(f"\n> **RUN STOPPED EARLY** - {stop_reason}. The table above covers "
                      "only the plans completed before the cap.\n")
+    # Two different numbers, and conflating them has already caused confusion. The cost of
+    # the results is what the table above was paid for, whenever that happened; the spend
+    # this run is what this invocation added. A re-run served entirely from cache correctly
+    # reports a real cost for the results and $0 of new spend.
+    results_cost = sum(
+        r["cost_usd"] for rows in results.values() for r in rows
+        if r.get("ok") and r.get("cost_usd") is not None
+    )
     cap_note = f" (cap ${args.max_spend:.2f})" if args.max_spend else ""
-    lines.append(f"\nMeasured spend this run: **${spend['total']:.4f}**{cap_note}\n")
+    lines.append(f"\nCost of the results in this table: **${results_cost:.4f}**")
+    lines.append(f"\nNew spend this run: **${spend['total']:.4f}**{cap_note}\n")
     lines.append("\n**STOP.** This is the cost gate. The full run needs explicit approval.\n")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -500,7 +538,8 @@ def main() -> int:
         json.dumps({"results": results, "reference": ref_totals}, indent=2), encoding="utf-8"
     )
     cap_note = f" (cap ${args.max_spend:.2f})" if args.max_spend else ""
-    print(f"\nmeasured spend this run: ${spend['total']:.4f}{cap_note}")
+    print(f"\ncost of the results in this table: ${results_cost:.4f}")
+    print(f"new spend this run: ${spend['total']:.4f}{cap_note}")
     if stop_reason:
         print(f"RUN STOPPED EARLY: {stop_reason}")
     print(f"wrote {args.out}")
